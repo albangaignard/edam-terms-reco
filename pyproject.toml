@@ -1,0 +1,16 @@
+[project]
+name = "EDAM-term-recommender"
+version = "0.1.0"
+description = "EDAM-Terms-Reco is a tool designed to assist researchers and developers in identifying and recommending relevant EDAM ontology terms for bioinformatics resources, workflows, and datasets. The project aims to improve metadata annotation and interoperability in the life sciences. This is an early prototype and a work in progress. The tool has not been yet validated against any ground truth."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "faiss-cpu>=1.12.0",
+    "rdflib>=7.1.4",
+    "sentence-transformers",
+    "chainlit"
+]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
