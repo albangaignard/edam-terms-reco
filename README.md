@@ -6,17 +6,19 @@ EDAM-Terms-Reco is a tool designed to assist researchers and developers in ident
 This is an early prototype and a work in progress. The tool has not been yet validated against any ground truth. 
 
 ## Features
-- [x] Automatic recommendation of EDAM ontology terms based on input data or descriptions
-- [x] User-friendly web interface for manual term selection and review
-- [ ] Support for multiple input formats (text, JSON, XML)
-- [ ] RESTful API for integration with other tools and platforms
-- [ ] Export recommended terms in standard formats
+- Automatic recommendation of EDAM ontology terms based on input data or descriptions
+- User-friendly web interface for manual term selection and review
+
+*Possible future works*
+- Command line interface
+- RESTful API 
+- Export recommended terms in standard formats
 
 ## Installation
 
 ### Prerequisites
-- Python 3.8+
-- pip
+- Python 3.12+
+- pip, uv
 
 ### Steps
 1. Clone the repository:
@@ -42,6 +44,10 @@ This is an early prototype and a work in progress. The tool has not been yet val
 
 ### Web Interface
 Open your browser and navigate to `http://localhost:8000` to use the graphical interface.
+
+### Demo 
+The following screenshot showcase how relevant EDAM ontology terms can be suggested based on a textual desciprition provided by the BWA tool man page. A small transformer model is used to compute the top-10 closests ontology classes, logical reasoning on the ontology hierarchy is used to count the number of more specific terms. This indicates here that the "Sequencing" term could be replaced by more specific terms.  
+![](edam-terms-reco-demo.png)
 
 ## Contributing
 Contributions are welcome! Please follow these steps:
