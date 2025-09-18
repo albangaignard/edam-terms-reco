@@ -1,7 +1,7 @@
 # EDAM-Terms-Reco
 
 ## Overview
-EDAM-Terms-Reco is a tool designed to assist researchers and developers in identifying and recommending relevant EDAM ontology terms for bioinformatics resources, workflows, and datasets. The project aims to improve metadata annotation and interoperability in the life sciences. 
+EDAM-Terms-Reco is a tool designed to assist researchers and developers in identifying and recommending relevant [EDAM ontology](http://edamontology.org) terms for bioinformatics resources, workflows, and datasets. The project aims to improve metadata annotation and interoperability in the life sciences. 
 
 This is an early prototype and a work in progress. The tool has not been yet validated against any ground truth. 
 
