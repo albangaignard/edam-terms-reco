@@ -49,6 +49,9 @@ Open your browser and navigate to `http://localhost:8000` to use the graphical i
 The following screenshot showcase how relevant EDAM ontology terms can be suggested based on a textual desciprition provided by the BWA tool man page. A small transformer model ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) is used to compute the top-10 closests ontology classes, logical reasoning on the ontology hierarchy is used to count the number of more specific terms. This indicates here that the "Sequencing" term could be replaced by more specific terms.  
 ![](edam-terms-reco-demo.png)
 
+Here is a more advanced scenario powered by an LLM (qwen3-32b):  
+![](demo.gif)
+
 ## Contributing
 Contributions are welcome! Please follow these steps:
 1. Fork the repository
