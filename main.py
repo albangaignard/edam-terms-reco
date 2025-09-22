@@ -474,7 +474,8 @@ async def on_message(message: cl.Message):
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.TOPIC, k=1)
                 top_class["Generated term"] = k
                 edam_topics = pd.concat([edam_topics, top_class], ignore_index=True)
-            edam_topics.sort_values(by=["Similarity"], ascending=False, inplace=True)
+            if not edam_topics.empty:
+                edam_topics.sort_values(by=["Similarity"], ascending=False, inplace=True)
         
             answer = cl.Message(
                 content="Here are the relevant EDAM Topics: ",
@@ -494,7 +495,8 @@ async def on_message(message: cl.Message):
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.OPERATION, k=1)
                 top_class["Generated term"] = k
                 edam_operations = pd.concat([edam_operations, top_class], ignore_index=True)
-            edam_operations.sort_values(by=["Similarity"], ascending=False, inplace=True)
+            if not edam_operations.empty:
+                edam_operations.sort_values(by=["Similarity"], ascending=False, inplace=True)
 
             answer = cl.Message(
                 content="Here are the relevant EDAM Operations: ",
@@ -514,7 +516,8 @@ async def on_message(message: cl.Message):
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.DATA, k=1)
                 top_class["Generated term"] = k
                 edam_data = pd.concat([edam_data, top_class], ignore_index=True)
-            edam_data.sort_values(by=["Similarity"], ascending=False, inplace=True)
+            if not edam_data.empty:
+                edam_data.sort_values(by=["Similarity"], ascending=False, inplace=True)
 
             answer = cl.Message(
                 content="Here are the relevant EDAM Data: ",
@@ -535,7 +538,8 @@ async def on_message(message: cl.Message):
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.FORMAT, k=1)
                 top_class["Generated term"] = k
                 edam_formats = pd.concat([edam_formats, top_class], ignore_index=True)
-            edam_formats.sort_values(by=["Similarity"], ascending=False, inplace=True)
+            if not edam_formats.empty:
+                edam_formats.sort_values(by=["Similarity"], ascending=False, inplace=True)
 
             answer = cl.Message(
                 content="Here are the relevant EDAM Formats: ",
