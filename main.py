@@ -125,9 +125,8 @@ async def retrieve_from_all_classes(question: str) -> str:
     _vector = np.array([search_vector])
     faiss.normalize_L2(_vector)
 
-    # k = index.ntotal
     # top-K :
-    k = 5
+    k = 20
     distances, ann = index.search(_vector, k=k)
 
     # print(f"Distances: {distances}")
