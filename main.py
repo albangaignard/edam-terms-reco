@@ -144,11 +144,11 @@ async def retrieve_from_all_classes(question: str) -> str:
 
     for c in top_5["Class ID"]:
         n_sub_classes = count_sub_classes(c, edam_graph)[0]
-        top_5.loc[top_5["Class ID"] == c, "child_terms"] = n_sub_classes
+        top_5.loc[top_5["Class ID"] == c, "child_terms"] = int(n_sub_classes)
 
     return top_5[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
 
-async def retrieve_classes(question: str, term_type: EDAMTerms) -> str:
+async def retrieve_classes(question: str, term_type: EDAMTerms, k = 5) -> str:
 
     search_vector = encoder.encode(question)
     _vector = np.array([search_vector])
@@ -156,13 +156,10 @@ async def retrieve_classes(question: str, term_type: EDAMTerms) -> str:
 
     index = indexes[term_type.value]
 
-    # top-K :
-    k = 5
     distances, ann = index.search(_vector, k=k)
 
     #print(f"Distances: {distances[0]}")
     #print(f"ANN: {ann[0]}")
-
     dist_df = pd.DataFrame(
         {
             "Similarity": pd.Series(distances[0]).apply(lambda x: round(x, 2)),
@@ -170,16 +167,16 @@ async def retrieve_classes(question: str, term_type: EDAMTerms) -> str:
         }
     )
 
-    top_5 = pd.merge(dist_df, split_classes[term_type.value], left_on="ann", right_index=True)
+    top_k = pd.merge(dist_df, split_classes[term_type.value], left_on="ann", right_index=True)
 
-    if len(top_5) == 0:
+    if len(top_k) == 0:
         return pd.DataFrame(columns=["Preferred Label", "Similarity", "child_terms", "Class ID"])
     else:
-        for c in top_5["Class ID"]:
+        for c in top_k["Class ID"]:
             n_sub_classes = count_sub_classes(c, edam_graph)[0]
-            top_5.loc[top_5["Class ID"] == c, "child_terms"] = n_sub_classes
+            top_k.loc[top_k["Class ID"] == c, "child_terms"] = int(n_sub_classes)
 
-        return top_5[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
+        return top_k[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
 
 # a prompt template for the LLM, asking to generate EDAM terms in JSON 
 # format with 4 fields: topic, operation, data, format
@@ -234,18 +231,23 @@ INSTRUCTIONS:
 async def chat_profile():
     return [
         cl.ChatProfile(
-            name="EDAM retriever",
+            name="EDAM retriever V1",
             markdown_description="FAISS index over EDAM ontology terms.",
             # icon="https://picsum.photos/200",
         ),
         cl.ChatProfile(
-            name="EDAM generator and retriever V1",
-            markdown_description="LLM generation of EDAM terms + FAISS index search over EDAM ontology terms.",
+            name="EDAM generator and retriever V2",
+            markdown_description="LLM generation of Bioinformatics tags + global FAISS index search over EDAM ontology terms.",
             #icon="https://picsum.photos/250",
         ),
         cl.ChatProfile(
-            name="EDAM generator and retriever V2",
-            markdown_description="LLM generation of EDAM terms, including a subset of the prompt + FAISS index search over EDAM ontology terms.",
+            name="EDAM generator and retriever V3",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + global FAISS index search over EDAM ontology terms.",
+            # icon="https://picsum.photos/250",
+        ),
+        cl.ChatProfile(
+            name="EDAM generator and retriever V4",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + per-term FAISS index search over EDAM to retrieve the Top-1 class",
             # icon="https://picsum.photos/250",
         ),
     ]
@@ -346,7 +348,7 @@ async def download_message(action):
 async def on_message(message: cl.Message):
     """Main function to handle when user send a message to the assistant."""
 
-    if cl.user_session.get("chat_profile") == "EDAM retriever":
+    if cl.user_session.get("chat_profile") == "EDAM retriever V1":
         relevant_classes = await retrieve_from_all_classes(message.content)
         dict_rel_classes = json.loads(relevant_classes.to_json())
         print(dict_rel_classes)
@@ -359,6 +361,15 @@ async def on_message(message: cl.Message):
             actions=[cl.Action(name="download_edam_terms", label="EDAM terms in CSV", icon="file", payload=dict_rel_classes)]
         )
         await answer.send()
+    
+        mean_similarity = round(relevant_classes["Similarity"].mean(), 2) 
+        mean_child_terms = round(relevant_classes["child_terms"].mean(), 2)
+        answer = cl.Message(
+            content=f"Here are the merged annotations statistics:\n"
+                    f"- Mean Similarity: {mean_similarity}\n"
+                    f"- Mean Child Terms: {mean_child_terms}"
+        )
+        await answer.send()
 
     elif "EDAM generator" in cl.user_session.get("chat_profile"):
 
@@ -366,9 +377,10 @@ async def on_message(message: cl.Message):
 
         msg = cl.Message(content="")
 
+        ## by default select templateV2
+        q = templateV2.format(input=message.content)
+
         if cl.user_session.get("chat_profile") == "EDAM generator and retriever V2":
-            q = templateV2.format(input=message.content)
-        else:
             q = templateV1.format(input=message.content)
 
         async for chunk in runnable.astream(
@@ -378,7 +390,7 @@ async def on_message(message: cl.Message):
             await msg.stream_token(chunk)
 
         await msg.send()
-        
+
         # now that we have LLM-generated JSON, we can parse it and retrieve relevant EDAM terms
         json_data = json.loads(extract_json(msg.content))                            
         topic_terms = json_data["topic"]
@@ -386,50 +398,176 @@ async def on_message(message: cl.Message):
         data_terms = json_data["data"]
         format_terms = json_data["format"]
 
-        # align generated topic tags to EDAM topics
-        if len(topic_terms.keys()) > 0:
-            relevant_topics = await retrieve_classes(json.dumps(topic_terms), EDAMTerms.TOPIC)
+        merged_annotations = pd.DataFrame()
+        if ("V2" in cl.user_session.get("chat_profile")) or ("V3" in cl.user_session.get("chat_profile")):
+            # align generated topic tags to EDAM topics
+            if len(topic_terms.keys()) > 0:
+                relevant_topics = await retrieve_classes(json.dumps(topic_terms), EDAMTerms.TOPIC)
+                merged_annotations = pd.concat([merged_annotations, relevant_topics], ignore_index=True)
+                answer = cl.Message(
+                    content="Here are the relevant EDAM Topics: ",
+                    elements=[
+                        cl.Dataframe(data=relevant_topics, display="inline", name="Dataframe"),
+                    ],
+                    actions=[cl.Action(name="download_edam_terms", label="EDAM topics in CSV", icon="file", payload=json.loads(relevant_topics.to_json()))]
+                )
+                await answer.send()
+
+            # align generated operation tags to EDAM operations
+            if len(operation_terms.keys()) > 0:
+                relevant_operation_terms = await retrieve_classes(json.dumps(operation_terms), EDAMTerms.OPERATION)
+                merged_annotations = pd.concat([merged_annotations, relevant_operation_terms], ignore_index=True)
+                answer = cl.Message(
+                    content="Here are the relevant EDAM Operations: ",
+                    elements=[
+                        cl.Dataframe(data=relevant_operation_terms, display="inline", name="Dataframe"),
+                    ],
+                    actions=[cl.Action(name="download_edam_terms", label="EDAM operations in CSV", icon="file", payload=json.loads(relevant_operation_terms.to_json()))]    
+                )
+                await answer.send()
+
+            # align generated data tags to EDAM data
+            if len(data_terms.keys()) > 0:
+                relevant_data_terms = await retrieve_classes(json.dumps(data_terms), EDAMTerms.DATA)
+                merged_annotations = pd.concat([merged_annotations, relevant_data_terms], ignore_index=True)
+                answer = cl.Message(
+                    content="Here are the relevant EDAM Data: ",
+                    elements=[
+                        cl.Dataframe(data=relevant_data_terms, display="inline", name="Dataframe"),
+                    ],
+                    actions=[cl.Action(name="download_edam_terms", label="EDAM data in CSV", icon="file", payload=json.loads(relevant_data_terms.to_json()))]
+                )
+                await answer.send()
+
+            # align generated format tags to EDAM formats
+            if len(format_terms.keys()) > 0:
+                relevant_format_terms = await retrieve_classes(json.dumps(format_terms), EDAMTerms.FORMAT)
+                merged_annotations = pd.concat([merged_annotations, relevant_format_terms], ignore_index=True)
+                answer = cl.Message(
+                    content="Here are the relevant EDAM Formats: ",
+                    elements=[
+                        cl.Dataframe(data=relevant_format_terms, display="inline", name="Dataframe"),
+                    ],
+                    actions=[cl.Action(name="download_edam_terms", label="EDAM formats in CSV", icon="file", payload=json.loads(relevant_format_terms.to_json()))]
+                )
+                await answer.send()
+            
+            mean_similarity = round(merged_annotations["Similarity"].mean(), 2) 
+            mean_child_terms = round(merged_annotations["child_terms"].mean(), 2)
+            answer = cl.Message(
+                content=f"Here are the merged annotations statistics:\n"
+                        f"- Mean Similarity: {mean_similarity}\n"
+                        f"- Mean Child Terms: {mean_child_terms}"
+            )
+            await answer.send()
+
+        elif "V4" in cl.user_session.get("chat_profile"):
+            # for each of the 4 fields, we have a dictionary with key = term label, value = {definition, prompt_subset}
+            # we will use the prompt_subset to retrieve the most relevant EDAM class
+
+            # retrieve a single EDAM topic for each generated topic term
+            edam_topics = pd.DataFrame()
+            for k, v in topic_terms.items():
+                # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.TOPIC, k=2)
+                # # sort by child_terms ascending
+                # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
+                top_class = await retrieve_classes(json.dumps(v), EDAMTerms.TOPIC, k=1)
+                top_class["Generated term"] = k
+                edam_topics = pd.concat([edam_topics, top_class], ignore_index=True)
+            edam_topics.sort_values(by=["Similarity"], ascending=False, inplace=True)
+        
             answer = cl.Message(
                 content="Here are the relevant EDAM Topics: ",
                 elements=[
-                    cl.Dataframe(data=relevant_topics, display="inline", name="Dataframe"),
+                    cl.Dataframe(data=edam_topics, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM topics in CSV", icon="file", payload=json.loads(relevant_topics.to_json()))]
+                actions=[cl.Action(name="download_edam_terms", label="EDAM topics in CSV", icon="file", payload=json.loads(edam_topics.to_json()))]
             )
             await answer.send()
 
-        # align generated operation tags to EDAM operations
-        if len(operation_terms.keys()) > 0:
-            relevant_operation_terms = await retrieve_classes(json.dumps(operation_terms), EDAMTerms.OPERATION)
+            # retrieve a single EDAM operation for each generated operation term
+            edam_operations = pd.DataFrame()
+            for k, v in operation_terms.items():
+                # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.OPERATION, k=2)
+                # # sort by child_terms ascending
+                # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
+                top_class = await retrieve_classes(json.dumps(v), EDAMTerms.OPERATION, k=1)
+                top_class["Generated term"] = k
+                edam_operations = pd.concat([edam_operations, top_class], ignore_index=True)
+            edam_operations.sort_values(by=["Similarity"], ascending=False, inplace=True)
+
             answer = cl.Message(
                 content="Here are the relevant EDAM Operations: ",
                 elements=[
-                    cl.Dataframe(data=relevant_operation_terms, display="inline", name="Dataframe"),
+                    cl.Dataframe(data=edam_operations, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM operations in CSV", icon="file", payload=json.loads(relevant_operation_terms.to_json()))]    
+                actions=[cl.Action(name="download_edam_terms", label="EDAM operations in CSV", icon="file", payload=json.loads(edam_operations.to_json()))]    
             )
             await answer.send()
 
-        # align generated data tags to EDAM data
-        if len(data_terms.keys()) > 0:
-            relevant_data_terms = await retrieve_classes(json.dumps(data_terms), EDAMTerms.DATA)
+            # retrieve a single EDAM data for each generated data term
+            edam_data = pd.DataFrame()
+            for k, v in data_terms.items():
+                # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.DATA, k=2)
+                # # sort by child_terms ascending
+                # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
+                top_class = await retrieve_classes(json.dumps(v), EDAMTerms.DATA, k=1)
+                top_class["Generated term"] = k
+                edam_data = pd.concat([edam_data, top_class], ignore_index=True)
+            edam_data.sort_values(by=["Similarity"], ascending=False, inplace=True)
+
             answer = cl.Message(
                 content="Here are the relevant EDAM Data: ",
                 elements=[
-                    cl.Dataframe(data=relevant_data_terms, display="inline", name="Dataframe"),
+                    cl.Dataframe(data=edam_data, display="inline", name="Dataframe"),       
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM data in CSV", icon="file", payload=json.loads(relevant_data_terms.to_json()))]
+                actions=[cl.Action(name="download_edam_terms", label="EDAM data in CSV", icon="file", payload=json.loads(edam_data.to_json()))]
             )
             await answer.send()
 
-        # align generated format tags to EDAM formats
-        if len(format_terms.keys()) > 0:
-            relevant_format_terms = await retrieve_classes(json.dumps(format_terms), EDAMTerms.FORMAT)
+            # retrieve a single EDAM format for each generated format term
+            edam_formats = pd.DataFrame()
+            for k, v in format_terms.items():
+                # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.FORMAT, k=2)
+                # # sort by child_terms ascending
+                # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
+                
+                top_class = await retrieve_classes(json.dumps(v), EDAMTerms.FORMAT, k=1)
+                top_class["Generated term"] = k
+                edam_formats = pd.concat([edam_formats, top_class], ignore_index=True)
+            edam_formats.sort_values(by=["Similarity"], ascending=False, inplace=True)
+
             answer = cl.Message(
                 content="Here are the relevant EDAM Formats: ",
                 elements=[
-                    cl.Dataframe(data=relevant_format_terms, display="inline", name="Dataframe"),
+                    cl.Dataframe(data=edam_formats, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM formats in CSV", icon="file", payload=json.loads(relevant_format_terms.to_json()))]
+                actions=[cl.Action(name="download_edam_terms", label="EDAM formats in CSV", icon="file", payload=json.loads(edam_formats.to_json()))]
+            )
+            await answer.send()
+
+            merged_annotations = pd.DataFrame()
+            if not edam_topics.empty:
+                merged_annotations = pd.concat([merged_annotations, edam_topics], ignore_index=True)
+            if not edam_operations.empty:
+                merged_annotations = pd.concat([merged_annotations, edam_operations], ignore_index=True)
+            if not edam_data.empty:
+                merged_annotations = pd.concat([merged_annotations, edam_data], ignore_index=True)
+            if not edam_formats.empty:
+                merged_annotations = pd.concat([merged_annotations, edam_formats], ignore_index=True)
+            
+            mean_similarity = round(merged_annotations["Similarity"].mean(), 2) 
+            mean_child_terms = round(merged_annotations["child_terms"].mean(), 2)
+            answer = cl.Message(
+                content=f"Here are the merged annotations statistics:\n"
+                        f"- Mean Similarity: {mean_similarity}\n"
+                        f"- Mean Child Terms: {mean_child_terms}"
+            )
+            await answer.send()
+
+        else:
+            print("Unknown chat profile, please select a valid chat profile.")
+            answer = cl.Message(
+                content="Unknown chat profile, please select a valid chat profile."
             )
             await answer.send()
