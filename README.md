@@ -33,7 +33,7 @@ This is an early prototype and a work in progress. The tool has not been yet val
     ```
 3. Install dependencies:
     ```bash
-    uv pip install 'numpy<2' pandas chainlit faiss-cpu rdflib 'sentence-transformers[torch]'
+    uv pip install 'numpy<2' pandas faiss-cpu chainlit langchain langchain-groq rdflib 'sentence-transformers[torch]'
     ```
 4. Start the web interface:
     ```bash

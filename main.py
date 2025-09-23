@@ -292,8 +292,8 @@ async def on_chat_start():
     print(f"Chat profile: {chat_profile}")
     
     model = ChatGroq(
-    #model="deepseek-r1-distill-llama-70b",
-    model="qwen/qwen3-32b",
+    model="deepseek-r1-distill-llama-70b",
+    #model="qwen/qwen3-32b",
     temperature=0,
     max_tokens=None,
     reasoning_format="parsed",
