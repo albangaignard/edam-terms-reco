@@ -52,14 +52,5 @@ The following screenshot showcase how relevant EDAM ontology terms can be sugges
 Here is a more advanced scenario powered by an LLM (qwen3-32b):  
 ![](demo.gif)
 
-## Contributing
-Contributions are welcome! Please follow these steps:
-1. Fork the repository
-2. Create a new branch (`git checkout -b feature-branch`)
-3. Commit your changes
-4. Submit a pull request
-
-Please read the [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
-
 ## License
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
