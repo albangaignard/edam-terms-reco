@@ -33,7 +33,7 @@ This is an early prototype and a work in progress. The tool has not been yet val
     ```
 3. Install dependencies:
     ```bash
-    uv pip install 'numpy<2' pandas faiss-cpu chainlit langchain langchain-groq rdflib 'sentence-transformers[torch]'
+    uv pip install 'numpy<2' pandas faiss-cpu chainlit langchain langchain-groq langchain-ollama langchain-openai rdflib 'sentence-transformers[torch]'
     ```
 4. Start the web interface:
     ```bash
@@ -44,6 +44,15 @@ This is an early prototype and a work in progress. The tool has not been yet val
 
 ### Web Interface
 Open your browser and navigate to `http://localhost:8000` to use the graphical interface.
+
+### Provider + Model Switching
+- Environment defaults come from `.env` variables (see `.env.example`).
+- At chat start, the UI lets you override provider/model for the current session.
+- Supported providers:
+  - `ollama` for local Ollama
+  - `groq` for Groq API
+  - `albert` for Albert OpenAI-compatible endpoint
+  - `dev_openai` for local OpenAI-compatible APIs (LM Studio, vLLM, etc.)
 
 ### Demo 
 The following screenshot showcase how relevant EDAM ontology terms can be suggested based on a textual desciprition provided by the BWA tool man page. A small transformer model ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) is used to compute the top-10 closests ontology classes, logical reasoning on the ontology hierarchy is used to count the number of more specific terms. This indicates here that the "Sequencing" term could be replaced by more specific terms.  

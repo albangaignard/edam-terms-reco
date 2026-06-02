@@ -1,86 +1,126 @@
-import pytest
-import yaml
+from unittest.mock import MagicMock, patch
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+import sys
 
-import llm_config
+import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-def _write_config(tmp_path: Path, config: dict) -> Path:
-    p = tmp_path / "config.yaml"
-    p.write_text(yaml.dump(config))
-    return p
-
-
-def test_load_llm_groq(tmp_path, monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    config_path = _write_config(tmp_path, {
-        "active_profile": "groq-default",
-        "profiles": {
-            "groq-default": {"provider": "groq", "model": "some-model", "temperature": 0}
-        },
-    })
-    with patch.object(llm_config, "ChatGroq") as mock_cls:
-        mock_cls.return_value = MagicMock()
-        result = llm_config.load_llm(config_path=config_path)
-        mock_cls.assert_called_once_with(model="some-model", temperature=0, streaming=True)
-        assert result is mock_cls.return_value
+from providers.config import load_provider_config
+from providers.factory import build_chat_model
 
 
-def test_load_llm_ollama(tmp_path):
-    config_path = _write_config(tmp_path, {
-        "active_profile": "ollama-local",
-        "profiles": {
-            "ollama-local": {
-                "provider": "ollama",
-                "model": "llama3.2",
-                "base_url": "http://localhost:11434",
-                "temperature": 0,
-            }
-        },
-    })
-    with patch.object(llm_config, "ChatOllama") as mock_cls:
-        mock_cls.return_value = MagicMock()
-        result = llm_config.load_llm(config_path=config_path)
-        mock_cls.assert_called_once_with(
-            model="llama3.2", temperature=0, base_url="http://localhost:11434"
+def test_load_provider_config_defaults_to_ollama(monkeypatch) -> None:
+    monkeypatch.delenv("DEFAULT_PROVIDER", raising=False)
+    monkeypatch.delenv("DEFAULT_MODEL", raising=False)
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_MODEL", "qwen3:14b")
+
+    config = load_provider_config()
+
+    assert config.provider == "ollama"
+    assert config.model == "qwen3:14b"
+    assert config.base_url == "http://localhost:11434"
+
+
+def test_load_provider_config_groq_requires_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("DEFAULT_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="GROQ_API_KEY"):
+        load_provider_config()
+
+
+def test_load_provider_config_albert_supports_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("ALBERT_BASE_URL", "https://api.albert.com/v1")
+    monkeypatch.setenv("ALBERT_API_KEY", "env-key")
+    monkeypatch.setenv("ALBERT_MODEL", "env-model")
+
+    config = load_provider_config(
+        provider_override="albert",
+        model_override="override-model",
+        base_url_override="https://override.example/v1",
+        api_key_override="override-key",
+        temperature_override=0.3,
+    )
+
+    assert config.provider == "albert"
+    assert config.model == "override-model"
+    assert config.base_url == "https://override.example/v1"
+    assert config.api_key == "override-key"
+    assert config.temperature == 0.3
+
+
+def test_load_provider_config_unknown_provider_raises() -> None:
+    with pytest.raises(ValueError, match="Unsupported provider"):
+        load_provider_config(provider_override="unknown-provider")
+
+
+def test_build_chat_model_groq_calls_chatgroq_with_expected_args() -> None:
+    config = load_provider_config(
+        provider_override="groq",
+        model_override="openai/gpt-oss-120b",
+        api_key_override="test-key",
+    )
+
+    with patch("providers.factory.ChatGroq") as mock_chat_groq:
+        mock_chat_groq.return_value = MagicMock()
+        result = build_chat_model(config)
+
+        mock_chat_groq.assert_called_once()
+        call_kwargs = mock_chat_groq.call_args.kwargs
+        assert call_kwargs["model"] == "openai/gpt-oss-120b"
+        assert call_kwargs["temperature"] == config.temperature
+        assert call_kwargs["streaming"] is True
+        assert result is mock_chat_groq.return_value
+
+
+def test_build_chat_model_ollama_calls_chatollama_with_expected_args() -> None:
+    config = load_provider_config(
+        provider_override="ollama",
+        model_override="qwen3:14b",
+        base_url_override="http://localhost:11434",
+    )
+
+    with patch("providers.factory.ChatOllama") as mock_chat_ollama:
+        mock_chat_ollama.return_value = MagicMock()
+        result = build_chat_model(config)
+
+        mock_chat_ollama.assert_called_once_with(
+            model="qwen3:14b",
+            base_url="http://localhost:11434",
+            temperature=config.temperature,
         )
-        assert result is mock_cls.return_value
+        assert result is mock_chat_ollama.return_value
 
 
-def test_load_llm_ollama_default_base_url(tmp_path):
-    config_path = _write_config(tmp_path, {
-        "active_profile": "ollama-local",
-        "profiles": {
-            "ollama-local": {"provider": "ollama", "model": "llama3.2", "temperature": 0}
-        },
-    })
-    with patch.object(llm_config, "ChatOllama") as mock_cls:
-        mock_cls.return_value = MagicMock()
-        llm_config.load_llm(config_path=config_path)
-        mock_cls.assert_called_once_with(
-            model="llama3.2", temperature=0, base_url="http://localhost:11434"
-        )
+def test_build_chat_model_openai_compatible_calls_chatopenai() -> None:
+    config = load_provider_config(
+        provider_override="dev_openai",
+        model_override="local-model",
+        base_url_override="http://localhost:8000/v1",
+        api_key_override="dummy-key",
+    )
+
+    with patch("providers.factory.ChatOpenAI") as mock_chat_openai:
+        mock_chat_openai.return_value = MagicMock()
+        result = build_chat_model(config)
+
+        mock_chat_openai.assert_called_once()
+        call_kwargs = mock_chat_openai.call_args.kwargs
+        assert call_kwargs["model"] == "local-model"
+        assert call_kwargs["base_url"] == "http://localhost:8000/v1"
+        assert call_kwargs["api_key"] == "dummy-key"
+        assert result is mock_chat_openai.return_value
 
 
-def test_load_llm_missing_config_raises():
-    with pytest.raises(FileNotFoundError, match="nonexistent.yaml"):
-        llm_config.load_llm(config_path="nonexistent.yaml")
+def test_build_chat_model_missing_dependency_raises(monkeypatch) -> None:
+    config = load_provider_config(
+        provider_override="groq",
+        model_override="openai/gpt-oss-120b",
+        api_key_override="test-key",
+    )
+    monkeypatch.setattr("providers.factory.ChatGroq", None)
 
-
-def test_load_llm_unknown_profile_raises(tmp_path):
-    config_path = _write_config(tmp_path, {
-        "active_profile": "missing",
-        "profiles": {"groq-default": {"provider": "groq", "model": "m", "temperature": 0}},
-    })
-    with pytest.raises(KeyError, match="missing"):
-        llm_config.load_llm(config_path=config_path)
-
-
-def test_load_llm_unknown_provider_raises(tmp_path):
-    config_path = _write_config(tmp_path, {
-        "active_profile": "bad",
-        "profiles": {"bad": {"provider": "unknown", "model": "m", "temperature": 0}},
-    })
-    with pytest.raises(ValueError, match="unknown"):
-        llm_config.load_llm(config_path=config_path)
+    with pytest.raises(ImportError, match="langchain-groq"):
+        build_chat_model(config)

@@ -8,11 +8,11 @@ dependencies = [
     "chromadb>=0.4.0",
     "rdflib>=7.1.4",
     "sentence-transformers",
-    "pandas>=3.0.1",
-    "langchain-groq",
+    "chainlit",
     "langchain",
-    "langchain-core",
-    "langchain-ollama>=1.0.1",
+    "langchain-groq",
+    "langchain-ollama",
+    "langchain-openai",
 ]
 
 [dependency-groups]

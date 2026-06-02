@@ -1,28 +1,27 @@
-from enum import Enum
-import chainlit as cl
-
-from rdflib import Graph
-from sentence_transformers import SentenceTransformer
-import pandas as pd
-
-import chromadb
-import numpy as np
-
-import getpass
-import os
 import json
-import re
 import logging
-
-from llm_config import load_llm
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import Runnable
-from langchain_core.runnables.config import RunnableConfig
+import os
+import re
+from enum import Enum
 from typing import cast
 
-if "Albert_API_KEY" not in os.environ:
-    os.environ["Albert_API_KEY"] = getpass.getpass("Enter your Albert API key: ")
+import chainlit as cl
+import chromadb
+import numpy as np
+import pandas as pd
+from chainlit.input_widget import Select, TextInput
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable
+from langchain_core.runnables.config import RunnableConfig
+from rdflib import Graph
+from sentence_transformers import SentenceTransformer
+
+from providers.config import SUPPORTED_PROVIDERS, load_provider_config
+from providers.factory import build_chat_model
+
+DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "")
 
 url = "data/EDAM_1.25.csv"
 
@@ -52,6 +51,7 @@ def gen_full_desc(row):
     ## TODO take into account inherited definitions from parents
     full_desc = f"""{row["Preferred Label"]}, also known as {row["Synonyms"]} is an ontology class. It is defined as follows: {row["Definitions"]}. This class is identified with the following identifier: {row["Class ID"]}. """
     return full_desc
+
 
 df["full_desc"] = df.apply(gen_full_desc, axis=1)
 
@@ -98,6 +98,38 @@ class EDAMTerms(Enum):
     FORMAT = "format"
 
 
+class AppMode(Enum):
+    RETRIEVER_ONLY = "retriever_only"
+    GENERATE_THEN_RETRIEVE = "generate_then_retrieve"
+    PER_FIELD_TOP1 = "per_field_top1"
+
+
+PROFILE_TO_MODE = {
+    "EDAM retriever V1": AppMode.RETRIEVER_ONLY,
+    "EDAM generator and retriever V2": AppMode.GENERATE_THEN_RETRIEVE,
+    "EDAM generator and retriever V3": AppMode.GENERATE_THEN_RETRIEVE,
+    "EDAM generator and retriever V4": AppMode.PER_FIELD_TOP1,
+}
+
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "groq":
+        return os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    if provider == "albert":
+        return os.getenv("ALBERT_MODEL", "albert-large")
+    if provider == "dev_openai":
+        return os.getenv("DEV_OPENAI_MODEL", "local-model")
+    return os.getenv("OLLAMA_MODEL", "qwen3:14b")
+
+
+def _resolve_provider_and_model(settings: dict) -> tuple[str, str]:
+    provider = settings.get("llm_provider", DEFAULT_PROVIDER)
+    model = settings.get(
+        "llm_model", DEFAULT_MODEL or _default_model_for_provider(provider)
+    )
+    return str(provider).strip().lower(), str(model).strip()
+
+
 def normalize_embedding_vectors(vectors):
     """Normalize vectors to unit length."""
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -127,7 +159,7 @@ for term in EDAMTerms:
     try:
         indexes[term.value] = client.get_collection(name=f"edam_{term.value}")
         print(f"{term.value} index loaded from disk")
-    except Exception as e:
+    except Exception:
         print(f"{term.value} index not found, creating a new one")
         text_df = df[
             df["Class ID"].str.contains(".org/" + term.value + "_")
@@ -183,11 +215,13 @@ async def retrieve_from_all_classes(question: str) -> str:
         1 - d for d in distances
     ]  # For cosine distance, similarity = 1 - distance
 
-    dist_df = pd.DataFrame({
-        "Similarity": [round(s, 2) for s in similarities],
-        "Class ID": [m["class_id"] for m in metadatas],
-        "Preferred Label": [m["preferred_label"] for m in metadatas],
-    })
+    dist_df = pd.DataFrame(
+        {
+            "Similarity": [round(s, 2) for s in similarities],
+            "Class ID": [m["class_id"] for m in metadatas],
+            "Preferred Label": [m["preferred_label"] for m in metadatas],
+        }
+    )
 
     top_k = dist_df.copy()
 
@@ -220,11 +254,13 @@ async def retrieve_classes(question: str, term_type: EDAMTerms, k=5) -> str:
     # Convert distances to similarities
     similarities = [1 - d for d in distances]
 
-    top_k = pd.DataFrame({
-        "Similarity": [round(s, 2) for s in similarities],
-        "Class ID": [m["class_id"] for m in metadatas],
-        "Preferred Label": [m["preferred_label"] for m in metadatas],
-    })
+    top_k = pd.DataFrame(
+        {
+            "Similarity": [round(s, 2) for s in similarities],
+            "Class ID": [m["class_id"] for m in metadatas],
+            "Preferred Label": [m["preferred_label"] for m in metadatas],
+        }
+    )
 
     if len(top_k) == 0:
         return pd.DataFrame(
@@ -353,18 +389,51 @@ async def set_starters():
 async def on_chat_start():
     chat_profile = cl.user_session.get("chat_profile")
     print(f"Chat profile: {chat_profile}")
+    mode = PROFILE_TO_MODE.get(chat_profile, AppMode.GENERATE_THEN_RETRIEVE)
 
-    model = load_llm()
-    # model = ChatOpenAI(streaming=True)
-    prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
-        ),
-        ("human", "{question}"),
-    ])
+    default_provider = (
+        DEFAULT_PROVIDER if DEFAULT_PROVIDER in SUPPORTED_PROVIDERS else "ollama"
+    )
+    default_model = DEFAULT_MODEL or _default_model_for_provider(default_provider)
+
+    settings = await cl.ChatSettings(
+        [
+            Select(
+                id="llm_provider",
+                label="LLM provider",
+                values=list(SUPPORTED_PROVIDERS),
+                initial_index=list(SUPPORTED_PROVIDERS).index(default_provider),
+            ),
+            TextInput(
+                id="llm_model",
+                label="Model",
+                initial=default_model,
+                placeholder="e.g. qwen3:14b, openai/gpt-oss-120b, albert-large",
+            ),
+        ]
+    ).send()
+
+    selected_provider, selected_model = _resolve_provider_and_model(settings)
+    provider_config = load_provider_config(
+        provider_override=selected_provider,
+        model_override=selected_model,
+    )
+    model = build_chat_model(provider_config)
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
+            ),
+            ("human", "{question}"),
+        ]
+    )
     runnable = prompt | model | StrOutputParser()
     cl.user_session.set("runnable", runnable)
+    cl.user_session.set("app_mode", mode.value)
+    cl.user_session.set("llm_provider", provider_config.provider)
+    cl.user_session.set("llm_model", provider_config.model)
 
 
 def extract_json(text: str):
@@ -401,8 +470,11 @@ async def download_message(action):
 @cl.on_message
 async def on_message(message: cl.Message):
     """Main function to handle when user send a message to the assistant."""
+    mode = AppMode(
+        cl.user_session.get("app_mode", AppMode.GENERATE_THEN_RETRIEVE.value)
+    )
 
-    if cl.user_session.get("chat_profile") == "EDAM retriever V1":
+    if mode == AppMode.RETRIEVER_ONLY:
         relevant_classes = await retrieve_from_all_classes(message.content)
         dict_rel_classes = json.loads(relevant_classes.to_json())
         print(dict_rel_classes)
@@ -432,7 +504,7 @@ async def on_message(message: cl.Message):
         )
         await answer.send()
 
-    elif "EDAM generator" in cl.user_session.get("chat_profile"):
+    elif mode in (AppMode.GENERATE_THEN_RETRIEVE, AppMode.PER_FIELD_TOP1):
         runnable = cast(Runnable, cl.user_session.get("runnable"))  # type: Runnable
 
         msg = cl.Message(content="")
@@ -459,9 +531,7 @@ async def on_message(message: cl.Message):
         format_terms = json_data["format"]
 
         merged_annotations = pd.DataFrame()
-        if ("V2" in cl.user_session.get("chat_profile")) or (
-            "V3" in cl.user_session.get("chat_profile")
-        ):
+        if mode == AppMode.GENERATE_THEN_RETRIEVE:
             # align generated topic tags to EDAM topics
             if len(topic_terms.keys()) > 0:
                 relevant_topics = await retrieve_classes(
@@ -579,7 +649,7 @@ async def on_message(message: cl.Message):
             )
             await answer.send()
 
-        elif "V4" in cl.user_session.get("chat_profile"):
+        elif mode == AppMode.PER_FIELD_TOP1:
             # for each of the 4 fields, we have a dictionary with key = term label, value = {definition, prompt_subset}
             # we will use the prompt_subset to retrieve the most relevant EDAM class
 
