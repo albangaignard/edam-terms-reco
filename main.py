@@ -224,7 +224,11 @@ def _fetch_remote_models(provider: str) -> list[str]:
         if provider == "ollama"
         else _models_url_from_base(base_url)
     )
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "edam-terms-reco/1.0",
+    }
     api_key = (
         os.getenv(api_key_env.get(provider, ""), "").strip()
         if provider in api_key_env
