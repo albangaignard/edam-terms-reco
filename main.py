@@ -14,15 +14,15 @@ import json
 import re
 import logging
 
-from langchain_groq import ChatGroq
+from llm_config import load_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import Runnable
 from langchain_core.runnables.config import RunnableConfig
 from typing import cast
 
-if "GROQ_API_KEY" not in os.environ:
-    os.environ["GROQ_API_KEY"] = getpass.getpass("Enter your Groq API key: ")
+if "Albert_API_KEY" not in os.environ:
+    os.environ["Albert_API_KEY"] = getpass.getpass("Enter your Albert API key: ")
 
 url = "data/EDAM_1.25.csv"
 
@@ -294,22 +294,22 @@ async def chat_profile():
     return [
         cl.ChatProfile(
             name="EDAM retriever V1",
-            markdown_description="Chroma DB vector database search over EDAM ontology terms.",
+            markdown_description="Embedding-search over EDAM ontology terms.",
             # icon="https://picsum.photos/200",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V2",
-            markdown_description="LLM generation of Bioinformatics tags + global Chroma DB search over EDAM ontology terms.",
+            markdown_description="LLM generation of Bioinformatics tags + embedding-search over EDAM ontology terms.",
             # icon="https://picsum.photos/250",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V3",
-            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + global Chroma DB search over EDAM ontology terms.",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + embedding search over EDAM ontology terms.",
             # icon="https://picsum.photos/250",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V4",
-            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + per-term Chroma DB search over EDAM to retrieve the Top-1 class",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + per-term embedding search over EDAM to retrieve the Top-1 class",
             # icon="https://picsum.photos/250",
         ),
     ]
@@ -354,18 +354,7 @@ async def on_chat_start():
     chat_profile = cl.user_session.get("chat_profile")
     print(f"Chat profile: {chat_profile}")
 
-    model = ChatGroq(
-        model="openai/gpt-oss-120b",
-        # model="deepseek-r1-distill-llama-70b",
-        # model="qwen/qwen3-32b",
-        temperature=0,
-        max_tokens=None,
-        reasoning_format="parsed",
-        timeout=None,
-        max_retries=2,
-        streaming=True,
-        # other params...
-    )
+    model = load_llm()
     # model = ChatOpenAI(streaming=True)
     prompt = ChatPromptTemplate.from_messages([
         (
