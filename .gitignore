@@ -20,3 +20,6 @@ chroma_data/
 
 # Chainlit files
 .chainlit/
+
+# Opencode files
+opencode.json
