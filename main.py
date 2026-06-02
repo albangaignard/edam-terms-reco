@@ -204,8 +204,11 @@ def _provider_base_url(provider: str) -> str | None:
     return None
 
 
-def _models_url_from_base(base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/models"
+def _models_url_from_base(provider: str, base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if provider == "groq" and not normalized.endswith("/openai/v1"):
+        normalized = f"{normalized}/openai/v1"
+    return f"{normalized}/models"
 
 
 def _fetch_remote_models(provider: str) -> list[str]:
@@ -222,7 +225,7 @@ def _fetch_remote_models(provider: str) -> list[str]:
     url = (
         f"{base_url}/api/tags"
         if provider == "ollama"
-        else _models_url_from_base(base_url)
+        else _models_url_from_base(provider, base_url)
     )
     headers = {
         "Accept": "application/json",
