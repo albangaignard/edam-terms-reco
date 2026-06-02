@@ -31,6 +31,23 @@ ENABLE_DYNAMIC_MODEL_LIST = (
     os.getenv("ENABLE_DYNAMIC_MODEL_LIST", "false").strip().lower() == "true"
 )
 
+
+def _enabled_providers() -> list[str]:
+    configured = os.getenv("ENABLED_PROVIDERS", "").strip()
+    if not configured:
+        return list(SUPPORTED_PROVIDERS)
+    requested = [p.strip().lower() for p in configured.split(",") if p.strip()]
+    allowed = [p for p in requested if p in SUPPORTED_PROVIDERS]
+    if not allowed:
+        raise ValueError(
+            "ENABLED_PROVIDERS does not contain any supported provider. "
+            f"Supported: {', '.join(SUPPORTED_PROVIDERS)}"
+        )
+    return allowed
+
+
+ENABLED_PROVIDERS = _enabled_providers()
+
 url = "data/EDAM_1.25.csv"
 
 df = pd.read_csv(url)
@@ -122,6 +139,8 @@ PROFILE_TO_MODE = {
 
 def _resolve_provider_and_model(settings: dict) -> tuple[str, str]:
     provider = str(settings.get("llm_provider", DEFAULT_PROVIDER)).strip().lower()
+    if provider not in ENABLED_PROVIDERS:
+        provider = ENABLED_PROVIDERS[0]
     model = str(settings.get("llm_model", "")).strip()
     if not model:
         models = _get_provider_models(provider)
@@ -246,6 +265,8 @@ async def _refresh_settings_form(provider: str, model: str) -> None:
 
 
 def _settings_widgets(provider: str, model: str) -> list[Select]:
+    if provider not in ENABLED_PROVIDERS:
+        provider = ENABLED_PROVIDERS[0]
     provider_models = _get_provider_models(provider)
     if not provider_models:
         raise ValueError(
@@ -258,8 +279,8 @@ def _settings_widgets(provider: str, model: str) -> list[Select]:
         Select(
             id="llm_provider",
             label="LLM provider",
-            values=list(SUPPORTED_PROVIDERS),
-            initial_index=list(SUPPORTED_PROVIDERS).index(provider),
+            values=ENABLED_PROVIDERS,
+            initial_index=ENABLED_PROVIDERS.index(provider),
         ),
         Select(
             id="llm_model",
@@ -594,7 +615,9 @@ async def on_chat_start():
     mode = PROFILE_TO_MODE.get(chat_profile, AppMode.GENERATE_THEN_RETRIEVE)
 
     default_provider = (
-        DEFAULT_PROVIDER if DEFAULT_PROVIDER in SUPPORTED_PROVIDERS else "ollama"
+        DEFAULT_PROVIDER
+        if DEFAULT_PROVIDER in ENABLED_PROVIDERS
+        else ENABLED_PROVIDERS[0]
     )
     default_models = _get_provider_models(default_provider)
     default_model = default_models[0] if default_models else ""
