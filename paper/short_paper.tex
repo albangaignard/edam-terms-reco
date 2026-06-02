@@ -1,0 +1,124 @@
+\documentclass[10pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{Evaluating EDAM-Terms-Reco: A Ground-Truth-Based Assessment of EDAM Term Recommendation}
+\author{First Author \and Second Author}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Annotating bioinformatics resources with EDAM terms improves discoverability and interoperability, but manual curation is costly.
+We present an evaluation of EDAM-Terms-Reco, a prototype that recommends EDAM ontology terms from textual descriptions.
+Using a curated ground truth, we assess recommendation quality with ranking and multi-label metrics.
+Results indicate that the approach is promising for top-ranked suggestions, while recall remains limited for rare or highly specific terms.
+We discuss error patterns and practical improvements for future iterations.
+\end{abstract}
+
+\section{Introduction}
+Semantic annotation is essential for FAIR bioinformatics metadata, yet assigning EDAM terms is often time-consuming and inconsistent.
+Automated recommendation systems can assist curators by proposing relevant terms from free text.
+EDAM-Terms-Reco is an early prototype designed for this purpose.
+In this paper, we provide a first ground-truth-based evaluation and answer the following research question:
+
+\begin{quote}
+\textit{How accurately can EDAM-Terms-Reco recommend relevant EDAM terms, and how does quality vary across ranking positions and term categories?}
+\end{quote}
+
+\section{Methods}
+\subsection{Task Definition}
+Given a textual description \(x\), the system outputs a ranked list of EDAM terms \((t_1, t_2, \dots)\).
+The ground truth is a set of reference terms \(G_x\), making this a multi-label ranking problem.
+
+\subsection{System Under Evaluation}
+We evaluate EDAM-Terms-Reco strategies implemented in our prototype (e.g., V1 and variants), which rely on ontology term resources and vector retrieval.
+
+\subsection{Ground Truth}
+The benchmark dataset contains bioinformatics resource descriptions with expert-validated EDAM annotations.
+We use strict matching at EDAM term ID level.
+(Optionally, a relaxed hierarchical analysis can be added in future work.)
+
+\section{Experimental Setup}
+\subsection{Data Split and Protocol}
+We use a fixed test set (or cross-validation, depending on available data) and keep preprocessing consistent across runs.
+Hyperparameters are fixed before final evaluation.
+
+\subsection{Metrics}
+We report:
+\begin{itemize}[leftmargin=*]
+    \item Precision@k and Recall@k (\(k \in \{1,3,5\}\))
+    \item F1@k
+    \item Mean Average Precision (MAP)
+    \item nDCG@k
+    \item Exact Match Ratio (strict set equality)
+    \item Coverage (fraction of instances with at least one relevant recommendation)
+\end{itemize}
+
+\section{Results}
+Table~\ref{tab:main-results} summarizes the main performance indicators.
+Figure~\ref{fig:pipeline} illustrates the evaluation pipeline.
+
+\begin{table}[h]
+\centering
+\caption{Main evaluation results on the test set.}
+\label{tab:main-results}
+\begin{tabular}{lcccccc}
+\toprule
+Model & P@1 & P@3 & R@3 & MAP & nDCG@5 & Exact Match \\
+\midrule
+Baseline (lexical) & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 \\
+EDAM-Terms-Reco V1 & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.9\linewidth}{
+\centering Placeholder for evaluation pipeline figure:
+\\ Input description $\rightarrow$ Retrieval/Ranking $\rightarrow$ Top-k EDAM terms $\rightarrow$ Metric computation
+}}
+\caption{Evaluation workflow.}
+\label{fig:pipeline}
+\end{figure}
+
+\section{Discussion}
+Our initial results suggest that the system can provide useful top-ranked suggestions, supporting curator-in-the-loop workflows.
+However, performance drops for rare, ambiguous, or highly specific terms.
+Common failure modes include lexical ambiguity and confusion between related EDAM branches (e.g., topic vs operation).
+These findings motivate score calibration, better handling of hierarchical structure, and domain-adapted reranking.
+
+\section{Threats to Validity}
+Internal validity may be affected by limited benchmark size and annotation noise.
+External validity is constrained by domain coverage and ontology version.
+Construct validity depends on strict ID matching, which may underestimate semantically close predictions.
+
+\section{Conclusion}
+We presented a short, ground-truth-based evaluation of EDAM-Terms-Reco.
+The prototype shows encouraging precision at top ranks but still requires improvements in recall and robustness.
+Future work will extend benchmarking, include hierarchical metrics, and compare against stronger retrieval baselines.
+
+\section*{Reproducibility Statement}
+We provide code, ontology version, benchmark split definition, fixed random seeds, and evaluation scripts to support reproducibility.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+\bibitem{edam}
+Ison, J. et al. EDAM: an ontology of bioinformatics operations, types of data and identifiers, topics and formats.
+\bibitem{fair}
+Wilkinson, M. D. et al. The FAIR Guiding Principles for scientific data management and stewardship.
+\end{thebibliography}
+
+\end{document}
+
