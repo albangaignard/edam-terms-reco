@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from enum import Enum
+from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -25,6 +26,30 @@ from providers.config import (
     provider_models_from_env,
 )
 from providers.factory import build_chat_model
+
+
+def _load_env_file(path: str = ".env") -> None:
+    """
+    Populate os.environ from a local .env file if present.
+    Existing environment variables take precedence.
+    """
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip().strip("'").strip('"')
+        os.environ[key] = value
+
+
+_load_env_file()
 
 DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
 ENABLE_DYNAMIC_MODEL_LIST = (
