@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+from urllib.error import URLError, HTTPError
+from urllib.request import Request, urlopen
 from enum import Enum
 from typing import cast
 
@@ -9,7 +11,7 @@ import chainlit as cl
 import chromadb
 import numpy as np
 import pandas as pd
-from chainlit.input_widget import Select, TextInput
+from chainlit.input_widget import Select
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
@@ -17,11 +19,17 @@ from langchain_core.runnables.config import RunnableConfig
 from rdflib import Graph
 from sentence_transformers import SentenceTransformer
 
-from providers.config import SUPPORTED_PROVIDERS, load_provider_config
+from providers.config import (
+    SUPPORTED_PROVIDERS,
+    load_provider_config,
+    provider_models_from_env,
+)
 from providers.factory import build_chat_model
 
 DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "")
+ENABLE_DYNAMIC_MODEL_LIST = (
+    os.getenv("ENABLE_DYNAMIC_MODEL_LIST", "false").strip().lower() == "true"
+)
 
 url = "data/EDAM_1.25.csv"
 
@@ -112,22 +120,145 @@ PROFILE_TO_MODE = {
 }
 
 
-def _default_model_for_provider(provider: str) -> str:
-    if provider == "groq":
-        return os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    if provider == "albert":
-        return os.getenv("ALBERT_MODEL", "albert-large")
-    if provider == "dev_openai":
-        return os.getenv("DEV_OPENAI_MODEL", "local-model")
-    return os.getenv("OLLAMA_MODEL", "qwen3:14b")
-
-
 def _resolve_provider_and_model(settings: dict) -> tuple[str, str]:
-    provider = settings.get("llm_provider", DEFAULT_PROVIDER)
-    model = settings.get(
-        "llm_model", DEFAULT_MODEL or _default_model_for_provider(provider)
+    provider = str(settings.get("llm_provider", DEFAULT_PROVIDER)).strip().lower()
+    model = str(settings.get("llm_model", "")).strip()
+    if not model:
+        models = _get_provider_models(provider)
+        if not models:
+            from providers.config import MODELS_ENV_KEYS
+
+            env_key = MODELS_ENV_KEYS.get(provider, "MODELS")
+            raise ValueError(
+                f"No models available for provider '{provider}'. "
+                f"Set {env_key} or enable dynamic model listing."
+            )
+        model = models[0]
+    return provider, model
+
+
+def _provider_base_url(provider: str) -> str | None:
+    if provider == "groq":
+        return (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").strip().rstrip(
+            "/"
+        )
+    if provider == "albert":
+        base = os.getenv("ALBERT_BASE_URL", "").strip()
+        return base.rstrip("/") if base else None
+    if provider == "dev_openai":
+        return os.getenv("DEV_OPENAI_BASE_URL", "http://localhost:8000/v1").strip().rstrip("/")
+    return None
+
+
+def _models_url_from_base(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/models"
+
+
+def _fetch_remote_models(provider: str) -> list[str]:
+    api_key_env = {
+        "groq": "GROQ_API_KEY",
+        "albert": "ALBERT_API_KEY",
+        "dev_openai": "DEV_OPENAI_API_KEY",
+    }
+    base_url = _provider_base_url(provider)
+    if not base_url or provider not in api_key_env:
+        return []
+
+    url = _models_url_from_base(base_url)
+    headers = {"Accept": "application/json"}
+    api_key = os.getenv(api_key_env[provider], "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    request = Request(url, headers=headers, method="GET")
+    with urlopen(request, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    models = []
+    for item in data:
+        model_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(model_id, str) and model_id.strip():
+            models.append(model_id.strip())
+    return models
+
+
+def _get_provider_models(provider: str) -> list[str]:
+    env_models = provider_models_from_env(provider)
+    if not ENABLE_DYNAMIC_MODEL_LIST:
+        return env_models
+
+    try:
+        remote_models = _fetch_remote_models(provider)
+        if remote_models:
+            return remote_models
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        logging.warning("Could not load dynamic model list for %s: %s", provider, exc)
+    return env_models
+
+
+async def _send_settings_form(initial_provider: str, initial_model: str):
+    provider_models = _get_provider_models(initial_provider)
+    if not provider_models:
+        raise ValueError(
+            f"No models available for provider '{initial_provider}'. "
+            "Configure MODELS in .env or enable dynamic model listing."
+        )
+
+    if initial_model not in provider_models:
+        initial_model = provider_models[0]
+
+    settings = await cl.ChatSettings(
+        [
+            Select(
+                id="llm_provider",
+                label="LLM provider",
+                values=list(SUPPORTED_PROVIDERS),
+                initial_index=list(SUPPORTED_PROVIDERS).index(initial_provider),
+            ),
+            Select(
+                id="llm_model",
+                label="Model",
+                values=provider_models,
+                initial_index=provider_models.index(initial_model),
+            ),
+        ]
+    ).send()
+    return settings
+
+
+def _build_runnable_with_settings(settings: dict) -> tuple[Runnable, str, str]:
+    selected_provider, selected_model = _resolve_provider_and_model(settings)
+    provider_config = load_provider_config(
+        provider_override=selected_provider,
+        model_override=selected_model,
     )
-    return str(provider).strip().lower(), str(model).strip()
+    model = build_chat_model(provider_config)
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
+            ),
+            ("human", "{question}"),
+        ]
+    )
+    runnable = prompt | model | StrOutputParser()
+    return runnable, provider_config.provider, provider_config.model
+
+
+async def _apply_llm_settings(settings: dict) -> None:
+    provider, model = _resolve_provider_and_model(settings)
+    provider_models = _get_provider_models(provider)
+    if provider_models and model not in provider_models:
+        model = provider_models[0]
+        settings = {**settings, "llm_provider": provider, "llm_model": model}
+
+    runnable, provider, model = _build_runnable_with_settings(settings)
+    cl.user_session.set("runnable", runnable)
+    cl.user_session.set("llm_provider", provider)
+    cl.user_session.set("llm_model", model)
 
 
 def normalize_embedding_vectors(vectors):
@@ -394,46 +525,24 @@ async def on_chat_start():
     default_provider = (
         DEFAULT_PROVIDER if DEFAULT_PROVIDER in SUPPORTED_PROVIDERS else "ollama"
     )
-    default_model = DEFAULT_MODEL or _default_model_for_provider(default_provider)
+    default_models = _get_provider_models(default_provider)
+    default_model = default_models[0] if default_models else ""
 
-    settings = await cl.ChatSettings(
-        [
-            Select(
-                id="llm_provider",
-                label="LLM provider",
-                values=list(SUPPORTED_PROVIDERS),
-                initial_index=list(SUPPORTED_PROVIDERS).index(default_provider),
-            ),
-            TextInput(
-                id="llm_model",
-                label="Model",
-                initial=default_model,
-                placeholder="e.g. qwen3:14b, openai/gpt-oss-120b, albert-large",
-            ),
-        ]
-    ).send()
+    settings = await _send_settings_form(default_provider, default_model)
 
-    selected_provider, selected_model = _resolve_provider_and_model(settings)
-    provider_config = load_provider_config(
-        provider_override=selected_provider,
-        model_override=selected_model,
-    )
-    model = build_chat_model(provider_config)
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
-            ),
-            ("human", "{question}"),
-        ]
-    )
-    runnable = prompt | model | StrOutputParser()
-    cl.user_session.set("runnable", runnable)
+    await _apply_llm_settings(settings)
     cl.user_session.set("app_mode", mode.value)
-    cl.user_session.set("llm_provider", provider_config.provider)
-    cl.user_session.set("llm_model", provider_config.model)
+
+
+@cl.on_settings_update
+async def on_settings_update(settings: dict):
+    selected_provider, selected_model = _resolve_provider_and_model(settings)
+    current_provider = cl.user_session.get("llm_provider", selected_provider)
+    if selected_provider != current_provider:
+        refreshed = await _send_settings_form(selected_provider, selected_model)
+        await _apply_llm_settings(refreshed)
+        return
+    await _apply_llm_settings(settings)
 
 
 def extract_json(text: str):

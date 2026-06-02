@@ -12,9 +12,8 @@ from providers.factory import build_chat_model
 
 def test_load_provider_config_defaults_to_ollama(monkeypatch) -> None:
     monkeypatch.delenv("DEFAULT_PROVIDER", raising=False)
-    monkeypatch.delenv("DEFAULT_MODEL", raising=False)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    monkeypatch.setenv("OLLAMA_MODEL", "qwen3:14b")
+    monkeypatch.setenv("OLLAMA_MODELS", "qwen3:14b")
 
     config = load_provider_config()
 
@@ -25,16 +24,26 @@ def test_load_provider_config_defaults_to_ollama(monkeypatch) -> None:
 
 def test_load_provider_config_groq_requires_api_key(monkeypatch) -> None:
     monkeypatch.setenv("DEFAULT_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_MODELS", "openai/gpt-oss-120b")
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     with pytest.raises(ValueError, match="GROQ_API_KEY"):
         load_provider_config()
 
 
+def test_load_provider_config_requires_models_list(monkeypatch) -> None:
+    monkeypatch.setenv("DEFAULT_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+
+    with pytest.raises(ValueError, match="OLLAMA_MODELS"):
+        load_provider_config()
+
+
 def test_load_provider_config_albert_supports_overrides(monkeypatch) -> None:
     monkeypatch.setenv("ALBERT_BASE_URL", "https://api.albert.com/v1")
     monkeypatch.setenv("ALBERT_API_KEY", "env-key")
-    monkeypatch.setenv("ALBERT_MODEL", "env-model")
+    monkeypatch.setenv("ALBERT_MODELS", "env-model,other-model")
 
     config = load_provider_config(
         provider_override="albert",

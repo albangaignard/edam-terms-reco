@@ -5,6 +5,13 @@ from typing import Any
 
 SUPPORTED_PROVIDERS = ("ollama", "groq", "albert", "dev_openai")
 
+MODELS_ENV_KEYS = {
+    "ollama": "OLLAMA_MODELS",
+    "groq": "GROQ_MODELS",
+    "albert": "ALBERT_MODELS",
+    "dev_openai": "DEV_OPENAI_MODELS",
+}
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -33,31 +40,52 @@ def _require(name: str, value: str | None) -> str:
     return value
 
 
-def _provider_defaults(provider: str) -> dict[str, Any]:
+def parse_models_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [m.strip() for m in value.split(",") if m.strip()]
+
+
+def provider_models_from_env(provider: str) -> list[str]:
+    env_key = MODELS_ENV_KEYS.get(provider)
+    if not env_key:
+        return []
+    return parse_models_list(os.getenv(env_key))
+
+
+def _provider_defaults(provider: str, *, require_models: bool = True) -> dict[str, Any]:
+    env_key = MODELS_ENV_KEYS[provider]
+    models = provider_models_from_env(provider)
+    if require_models and not models:
+        raise ValueError(
+            f"Missing or empty {env_key}: provide a comma-separated model list"
+        )
+    model = models[0] if models else ""
+
     if provider == "ollama":
         return {
-            "model": os.getenv("OLLAMA_MODEL", "qwen3:14b"),
+            "model": model,
             "base_url": _non_empty(os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")),
             "api_key": None,
             "reasoning_format": None,
         }
     if provider == "groq":
         return {
-            "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+            "model": model,
             "base_url": None,
             "api_key": _non_empty(os.getenv("GROQ_API_KEY")),
             "reasoning_format": "parsed",
         }
     if provider == "albert":
         return {
-            "model": os.getenv("ALBERT_MODEL", "albert-large"),
+            "model": model,
             "base_url": _non_empty(os.getenv("ALBERT_BASE_URL")),
             "api_key": _non_empty(os.getenv("ALBERT_API_KEY")),
             "reasoning_format": None,
         }
     if provider == "dev_openai":
         return {
-            "model": os.getenv("DEV_OPENAI_MODEL", "local-model"),
+            "model": model,
             "base_url": _non_empty(os.getenv("DEV_OPENAI_BASE_URL", "http://localhost:8000/v1")),
             "api_key": _non_empty(os.getenv("DEV_OPENAI_API_KEY", "dummy-key")),
             "reasoning_format": None,
@@ -80,8 +108,15 @@ def load_provider_config(
             f"Unsupported provider '{provider}'. Supported providers: {', '.join(SUPPORTED_PROVIDERS)}"
         )
 
-    defaults = _provider_defaults(provider)
+    defaults = _provider_defaults(
+        provider, require_models=not _non_empty(model_override)
+    )
     model = _non_empty(model_override) or defaults["model"]
+    if not model:
+        env_key = MODELS_ENV_KEYS[provider]
+        raise ValueError(
+            f"Missing or empty {env_key}: provide a comma-separated model list"
+        )
 
     config = ProviderConfig(
         provider=provider,
