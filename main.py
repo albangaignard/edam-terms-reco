@@ -2,10 +2,10 @@ import json
 import logging
 import os
 import re
-from urllib.error import URLError, HTTPError
-from urllib.request import Request, urlopen
 from enum import Enum
 from typing import cast
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import chainlit as cl
 import chromadb
@@ -138,15 +138,25 @@ def _resolve_provider_and_model(settings: dict) -> tuple[str, str]:
 
 
 def _provider_base_url(provider: str) -> str | None:
+    if provider == "ollama":
+        return (
+            os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip().rstrip("/")
+        )
     if provider == "groq":
-        return (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").strip().rstrip(
-            "/"
+        return (
+            (os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1")
+            .strip()
+            .rstrip("/")
         )
     if provider == "albert":
         base = os.getenv("ALBERT_BASE_URL", "").strip()
         return base.rstrip("/") if base else None
     if provider == "dev_openai":
-        return os.getenv("DEV_OPENAI_BASE_URL", "http://localhost:8000/v1").strip().rstrip("/")
+        return (
+            os.getenv("DEV_OPENAI_BASE_URL", "http://localhost:8000/v1")
+            .strip()
+            .rstrip("/")
+        )
     return None
 
 
@@ -161,12 +171,21 @@ def _fetch_remote_models(provider: str) -> list[str]:
         "dev_openai": "DEV_OPENAI_API_KEY",
     }
     base_url = _provider_base_url(provider)
-    if not base_url or provider not in api_key_env:
+    if not base_url:
         return []
 
-    url = _models_url_from_base(base_url)
+    # Ollama exposes installed models at /api/tags, not /models.
+    url = (
+        f"{base_url}/api/tags"
+        if provider == "ollama"
+        else _models_url_from_base(base_url)
+    )
     headers = {"Accept": "application/json"}
-    api_key = os.getenv(api_key_env[provider], "").strip()
+    api_key = (
+        os.getenv(api_key_env.get(provider, ""), "").strip()
+        if provider in api_key_env
+        else ""
+    )
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -174,12 +193,21 @@ def _fetch_remote_models(provider: str) -> list[str]:
     with urlopen(request, timeout=5) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
-    data = payload.get("data", []) if isinstance(payload, dict) else []
     models = []
-    for item in data:
-        model_id = item.get("id") if isinstance(item, dict) else None
-        if isinstance(model_id, str) and model_id.strip():
-            models.append(model_id.strip())
+    if provider == "ollama":
+        # Expected shape: {"models": [{"name": "qwen3:14b", ...}, ...]}
+        data = payload.get("models", []) if isinstance(payload, dict) else []
+        for item in data:
+            model_name = item.get("name") if isinstance(item, dict) else None
+            if isinstance(model_name, str) and model_name.strip():
+                models.append(model_name.strip())
+    else:
+        # OpenAI-compatible shape: {"data": [{"id": "..."}]}
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        for item in data:
+            model_id = item.get("id") if isinstance(item, dict) else None
+            if isinstance(model_id, str) and model_id.strip():
+                models.append(model_id.strip())
     return models
 
 
@@ -207,24 +235,54 @@ async def _send_settings_form(initial_provider: str, initial_model: str):
 
     if initial_model not in provider_models:
         initial_model = provider_models[0]
-
-    settings = await cl.ChatSettings(
-        [
-            Select(
-                id="llm_provider",
-                label="LLM provider",
-                values=list(SUPPORTED_PROVIDERS),
-                initial_index=list(SUPPORTED_PROVIDERS).index(initial_provider),
-            ),
-            Select(
-                id="llm_model",
-                label="Model",
-                values=provider_models,
-                initial_index=provider_models.index(initial_model),
-            ),
-        ]
-    ).send()
+    widgets = _settings_widgets(initial_provider, initial_model)
+    settings = await cl.ChatSettings(widgets).send()
     return settings
+
+
+async def _refresh_settings_form(provider: str, model: str) -> None:
+    widgets = _settings_widgets(provider, model)
+    await cl.ChatSettings(widgets).refresh()
+
+
+def _settings_widgets(provider: str, model: str) -> list[Select]:
+    provider_models = _get_provider_models(provider)
+    if not provider_models:
+        raise ValueError(
+            f"No models available for provider '{provider}'. "
+            "Configure MODELS in .env or enable dynamic model listing."
+        )
+    if model not in provider_models:
+        model = provider_models[0]
+    return [
+        Select(
+            id="llm_provider",
+            label="LLM provider",
+            values=list(SUPPORTED_PROVIDERS),
+            initial_index=list(SUPPORTED_PROVIDERS).index(provider),
+        ),
+        Select(
+            id="llm_model",
+            label="Model",
+            values=provider_models,
+            initial_index=provider_models.index(model),
+        ),
+    ]
+
+
+def _normalized_settings(settings: dict) -> dict:
+    provider, model = _resolve_provider_and_model(settings)
+    models = _get_provider_models(provider)
+    if models and model not in models:
+        model = models[0]
+    return {"llm_provider": provider, "llm_model": model}
+
+
+def _merge_settings_update(settings_update: dict) -> dict:
+    previous = cl.user_session.get("llm_settings", {}) or {}
+    merged = {**previous, **settings_update}
+    normalized = _normalized_settings(merged)
+    return normalized
 
 
 def _build_runnable_with_settings(settings: dict) -> tuple[Runnable, str, str]:
@@ -249,16 +307,29 @@ def _build_runnable_with_settings(settings: dict) -> tuple[Runnable, str, str]:
 
 
 async def _apply_llm_settings(settings: dict) -> None:
-    provider, model = _resolve_provider_and_model(settings)
-    provider_models = _get_provider_models(provider)
-    if provider_models and model not in provider_models:
-        model = provider_models[0]
-        settings = {**settings, "llm_provider": provider, "llm_model": model}
+    settings = _normalized_settings(settings)
 
     runnable, provider, model = _build_runnable_with_settings(settings)
     cl.user_session.set("runnable", runnable)
     cl.user_session.set("llm_provider", provider)
     cl.user_session.set("llm_model", model)
+    cl.user_session.set("llm_settings", settings)
+
+
+async def _sync_llm_settings_from_session() -> None:
+    """
+    Fallback for environments where on_settings_update is not emitted reliably.
+    """
+    session_settings = cl.user_session.get("chat_settings")
+    if not isinstance(session_settings, dict):
+        return
+
+    current = cl.user_session.get("llm_settings", {}) or {}
+    merged = {**current, **session_settings}
+    normalized = _normalized_settings(merged)
+
+    if normalized != current:
+        await _apply_llm_settings(normalized)
 
 
 def normalize_embedding_vectors(vectors):
@@ -527,7 +598,6 @@ async def on_chat_start():
     )
     default_models = _get_provider_models(default_provider)
     default_model = default_models[0] if default_models else ""
-
     settings = await _send_settings_form(default_provider, default_model)
 
     await _apply_llm_settings(settings)
@@ -536,13 +606,18 @@ async def on_chat_start():
 
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
-    selected_provider, selected_model = _resolve_provider_and_model(settings)
-    current_provider = cl.user_session.get("llm_provider", selected_provider)
-    if selected_provider != current_provider:
-        refreshed = await _send_settings_form(selected_provider, selected_model)
-        await _apply_llm_settings(refreshed)
-        return
-    await _apply_llm_settings(settings)
+    # Confirmed settings: commit provider/model and rebuild runnable.
+    merged_settings = _merge_settings_update(settings)
+    await _apply_llm_settings(merged_settings)
+
+
+@cl.on_settings_edit
+async def on_settings_edit(settings: dict):
+    # Live UI update while editing (without committing session settings).
+    merged = _merge_settings_update(settings)
+    provider = merged["llm_provider"]
+    model = merged["llm_model"]
+    await _refresh_settings_form(provider, model)
 
 
 def extract_json(text: str):
