@@ -41,6 +41,7 @@ def build_chat_model(config: ProviderConfig) -> BaseChatModel:
         _ensure_dependency(ChatGroq, "langchain-groq", config.provider)
         return ChatGroq(
             model=config.model,
+            api_key=config.api_key,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             reasoning_format=config.reasoning_format,
