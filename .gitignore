@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Environment variables
+.env
+
+# Ephemeral runtime storage
+.files
+
+# Chroma data (local vector database persistence)
+chroma_data/
+
+# Chainlit files
+.chainlit/
