@@ -14,14 +14,10 @@ import json
 import re
 import logging
 
-from llm_provider import load_llm
+from llm_provider import load_llm, load_profile, build_provider_profiles
 
-# Maps each chat profile name to the matching config.yaml profile key.
-PROVIDER_PROFILES = {
-    "Groq · gpt-oss-120b": "groq-default",
-    "Albert · Mistral-Small-3.2-24B-Instruct-2506": "albert-default",
-    "Ollama · llama3.2": "ollama-local",
-}
+# Built dynamically from config.yaml: {display_label: profile_key}
+PROVIDER_PROFILES = build_provider_profiles()
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import Runnable
@@ -353,15 +349,24 @@ async def set_starters():
     ]
 
 
+_SYSTEM_INSTRUCTION = "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions."
+
 def _build_runnable(provider_label: str):
-    model = load_llm(profile_name=PROVIDER_PROFILES[provider_label])
-    prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
-        ),
-        ("human", "{question}"),
-    ])
+    profile_key = PROVIDER_PROFILES[provider_label]
+    model = load_llm(profile_name=profile_key)
+    profile = load_profile(profile_name=profile_key)
+
+    if profile.get("provider") == "lmstudio":
+        # Models without system-role support: fold instruction into the human turn.
+        prompt = ChatPromptTemplate.from_messages([
+            ("human", f"{_SYSTEM_INSTRUCTION}\n\n{{question}}"),
+        ])
+    else:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", _SYSTEM_INSTRUCTION),
+            ("human", "{question}"),
+        ])
+
     return prompt | model | StrOutputParser()
 
 

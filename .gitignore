@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+*.index
+*.csv
+.chainlit
+.files
+.idea
+.vscode
+chroma_data
+docs
