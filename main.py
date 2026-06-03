@@ -8,21 +8,25 @@ import pandas as pd
 import chromadb
 import numpy as np
 
-import getpass
+from io import StringIO
 import os
 import json
 import re
 import logging
 
-from llm_config import load_llm
+from llm_provider import load_llm
+
+# Maps each chat profile name to the matching config.yaml profile key.
+PROVIDER_PROFILES = {
+    "Groq · gpt-oss-120b": "groq-default",
+    "Albert · Mistral-Small-3.2-24B-Instruct-2506": "albert-default",
+    "Ollama · llama3.2": "ollama-local",
+}
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import Runnable
 from langchain_core.runnables.config import RunnableConfig
 from typing import cast
-
-if "Albert_API_KEY" not in os.environ:
-    os.environ["Albert_API_KEY"] = getpass.getpass("Enter your Albert API key: ")
 
 url = "data/EDAM_1.25.csv"
 
@@ -349,13 +353,8 @@ async def set_starters():
     ]
 
 
-@cl.on_chat_start
-async def on_chat_start():
-    chat_profile = cl.user_session.get("chat_profile")
-    print(f"Chat profile: {chat_profile}")
-
-    model = load_llm()
-    # model = ChatOpenAI(streaming=True)
+def _build_runnable(provider_label: str):
+    model = load_llm(profile_name=PROVIDER_PROFILES[provider_label])
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
@@ -363,8 +362,34 @@ async def on_chat_start():
         ),
         ("human", "{question}"),
     ])
-    runnable = prompt | model | StrOutputParser()
-    cl.user_session.set("runnable", runnable)
+    return prompt | model | StrOutputParser()
+
+
+@cl.on_chat_start
+async def on_chat_start():
+    chat_profile = cl.user_session.get("chat_profile")
+    print(f"Chat profile: {chat_profile}")
+
+    if chat_profile and "EDAM generator" in chat_profile:
+        default_provider = list(PROVIDER_PROFILES.keys())[0]
+        settings = await cl.ChatSettings(
+            [
+                cl.input_widget.Select(
+                    id="provider",
+                    label="LLM Provider / Model",
+                    values=list(PROVIDER_PROFILES.keys()),
+                    initial_value=default_provider,
+                )
+            ]
+        ).send()
+        provider_label = settings.get("provider", default_provider)
+        cl.user_session.set("runnable", _build_runnable(provider_label))
+
+
+@cl.on_settings_update
+async def on_settings_update(settings):
+    provider_label = settings.get("provider", list(PROVIDER_PROFILES.keys())[0])
+    cl.user_session.set("runnable", _build_runnable(provider_label))
 
 
 def extract_json(text: str):
@@ -378,7 +403,7 @@ def extract_json(text: str):
 
 @cl.action_callback("download_edam_terms")
 async def download_message(action):
-    content = pd.read_json(json.dumps(action.payload))
+    content = pd.read_json(StringIO(json.dumps(action.payload)))
 
     file_name = "edam_terms.csv"
     if "topics" in action.label.lower():
@@ -392,9 +417,16 @@ async def download_message(action):
 
     content.to_csv(file_name, index=False)
 
+    # ensure the path is correct for the file element
+    file_path = os.path.abspath(file_name)
+    if not os.path.exists(file_path):
+        await cl.Message(content="Sorry, the file could not be found.").send()
+        return
+    print(f"File path for download: {file_path}")
+
     await cl.Message(
         content="Here are your EDAM terms:",
-        elements=[cl.File(name=file_name, path=file_name, display="inline")],
+        elements=[cl.File(name=file_name, path=file_path, display="inline")],
     ).send()
 
 
@@ -405,7 +437,9 @@ async def on_message(message: cl.Message):
     if cl.user_session.get("chat_profile") == "EDAM retriever V1":
         relevant_classes = await retrieve_from_all_classes(message.content)
         dict_rel_classes = json.loads(relevant_classes.to_json())
-        print(dict_rel_classes)
+        
+        assert isinstance(dict_rel_classes, dict)
+        assert "Preferred Label" in dict_rel_classes.keys()
 
         answer = cl.Message(
             content="Here are the relevant EDAM classes: ",

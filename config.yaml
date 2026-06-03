@@ -8,6 +8,13 @@ profiles:
 
   ollama-local:
     provider: ollama
-    model: llama3.2
-    base_url: http://localhost:11434
+    model: biomistral-7b-synthetic-ehr
+    base_url: http://localhost:1234/v1
+    temperature: 0
+
+  albert-default:
+    provider: albert
+    model: mistralai/Mistral-Small-3.2-24B-Instruct-2506
+    base_url: https://albert.api.etalab.gouv.fr/v1
+    api_key_env: ALBERT_API_KEY
     temperature: 0
