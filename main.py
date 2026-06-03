@@ -5,23 +5,24 @@ from rdflib import Graph
 from sentence_transformers import SentenceTransformer
 import pandas as pd
 
-import faiss
+import chromadb
 import numpy as np
 
-import getpass
+from io import StringIO
 import os
 import json
 import re
+import logging
 
-from langchain_groq import ChatGroq
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import StrOutputParser
-from langchain.schema.runnable import Runnable
-from langchain.schema.runnable.config import RunnableConfig
+from llm_provider import load_llm, load_profile, build_provider_profiles
+
+# Built dynamically from config.yaml: {display_label: profile_key}
+PROVIDER_PROFILES = build_provider_profiles()
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import Runnable
+from langchain_core.runnables.config import RunnableConfig
 from typing import cast
-
-if "GROQ_API_KEY" not in os.environ:
-    os.environ["GROQ_API_KEY"] = getpass.getpass("Enter your Groq API key: ")
 
 url = "data/EDAM_1.25.csv"
 
@@ -30,6 +31,7 @@ df = df[["Class ID", "Preferred Label", "Synonyms", "Definitions", "Parents"]]
 
 edam_graph = Graph()
 edam_graph.parse("data/EDAM_1.25.owl", format="xml")
+
 
 def count_sub_classes(uri, kg):
     query = f"""
@@ -44,6 +46,7 @@ def count_sub_classes(uri, kg):
     # print(f"Subclasses of {uri}: {r}")
     return r
 
+
 def gen_full_desc(row):
     ## Generate a full description of the ontology class
     ## TODO take into account inherited definitions from parents
@@ -55,26 +58,36 @@ df["full_desc"] = df.apply(gen_full_desc, axis=1)
 ## Embeddings
 encoder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# if edam_faiss.index exists, load it
+# Initialize persistent Chroma client
+client = chromadb.PersistentClient(path="./chroma_data")
+
+# Get or create collection for all EDAM terms
 try:
-    index = faiss.read_index("edam_faiss.index")
-    print("Index loaded from disk")
-except:
-    print("Index not found, creating a new one")    
+    index = client.get_collection(name="edam_all")
+    print("Collection loaded from disk")
+except Exception:
+    print("Collection not found, creating a new one")
+    # Encode all EDAM terms
+    vectors = encoder.encode(df["full_desc"].tolist())
 
-    # encoder = SentenceTransformer("sentence-transformers/LaBSE")
-    # encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")
-    vectors = encoder.encode(df["full_desc"])
+    # Create collection with embeddings
+    index = client.create_collection(name="edam_all", metadata={"hnsw:space": "cosine"})
 
-    ## Indexing
-    vector_dimension = vectors.shape[1]
-    
-    faiss.normalize_L2(vectors)
-    index = faiss.IndexFlatIP(vector_dimension)
-    index.add(vectors)
-
-    ## serialize the index to disk
-    faiss.write_index(index, "edam_faiss.index")
+    # Add documents with embeddings and metadata
+    index.add(
+        ids=[str(i) for i in range(len(df))],
+        embeddings=vectors.tolist(),
+        documents=df["full_desc"].tolist(),
+        metadatas=[
+            {
+                "class_id": row["Class ID"],
+                "preferred_label": row["Preferred Label"],
+                "synonyms": str(row["Synonyms"]),
+                "definitions": str(row["Definitions"]),
+            }
+            for _, row in df.iterrows()
+        ],
+    )
 
 
 # a python enum  for "topic", "operation", "data", "format"
@@ -84,93 +97,139 @@ class EDAMTerms(Enum):
     DATA = "data"
     FORMAT = "format"
 
+
+def normalize_embedding_vectors(vectors):
+    """Normalize vectors to unit length."""
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    return vectors / norms
+
+
+# function to normalize a query vector
+def normalize_query_vector(vector):
+    """Normalize a single query vector to unit length."""
+    norm = np.linalg.norm(vector)
+    if norm == 0:
+        return vector
+    return vector / norm
+
+
 indexes = {}
-split_classes = {} 
+split_classes = {}
 
 for term in EDAMTerms:
-
-    #split_classes[term.value] = df[df["Class ID"].str.contains(".org/" + term.value + "_")].reset_index(drop=True)
+    # split_classes[term.value] = df[df["Class ID"].str.contains(".org/" + term.value + "_")].reset_index(drop=True)
     ## copy df where Class ID contains ".org/" + term.value + "_" and reset the index
-    split_classes[term.value] = df[df["Class ID"].str.contains(".org/" + term.value + "_")].reset_index(drop=True)
+    split_classes[term.value] = df[
+        df["Class ID"].str.contains(".org/" + term.value + "_")
+    ].reset_index(drop=True)
 
-    # if edam_faiss.index exists, load it
+    # Try to get existing collection or create new one
     try:
-        indexes[term.value] = faiss.read_index(f"edam_{term.value}_faiss.index")
+        indexes[term.value] = client.get_collection(name=f"edam_{term.value}")
         print(f"{term.value} index loaded from disk")
-    except:
+    except Exception as e:
         print(f"{term.value} index not found, creating a new one")
-        text = df[df["Class ID"].str.contains(".org/" + term.value + "_")]["full_desc"]
-        print(f"Number of {term.value} terms: {len(text)}")
+        text_df = df[
+            df["Class ID"].str.contains(".org/" + term.value + "_")
+        ].reset_index(drop=True)
+        print(f"Number of {term.value} terms: {len(text_df)}")
 
-        vectors = encoder.encode(text.to_list())
+        vectors = encoder.encode(text_df["full_desc"].tolist())
+        vectors = normalize_embedding_vectors(vectors)
 
-        ## Indexing
-        vector_dimension = vectors.shape[1]
-        faiss.normalize_L2(vectors)
-        index = faiss.IndexFlatIP(vector_dimension)
-        #index = faiss.IndexFlatL2(vector_dimension)
-        index.add(vectors)
+        ## Create Chroma collection for this term type
+        index = client.create_collection(
+            name=f"edam_{term.value}", metadata={"hnsw:space": "cosine"}
+        )
 
-        ## serialize the index to disk
-        faiss.write_index(index, f"edam_{term.value}_faiss.index")
+        # Add documents with embeddings and metadata
+        index.add(
+            ids=[str(i) for i in range(len(text_df))],
+            embeddings=vectors.tolist(),
+            documents=text_df["full_desc"].tolist(),
+            metadatas=[
+                {
+                    "class_id": row["Class ID"],
+                    "preferred_label": row["Preferred Label"],
+                    "synonyms": str(row["Synonyms"]),
+                    "definitions": str(row["Definitions"]),
+                }
+                for _, row in text_df.iterrows()
+            ],
+        )
         indexes[term.value] = index
 
 
 print("Setup complete.")
 print("Available EDAM term types: ", indexes.keys())
+logging.info("Setup complete.")
+
 
 async def retrieve_from_all_classes(question: str) -> str:
-
+    """Retrieve relevant EDAM classes for a given question by querying the Chroma collection."""
     search_vector = encoder.encode(question)
-    _vector = np.array([search_vector])
-    faiss.normalize_L2(_vector)
+    search_vector = normalize_query_vector(search_vector)
 
-    # top-K :
-    k = 20
-    distances, ann = index.search(_vector, k=k)
+    # Query Chroma collection
+    k = 10
+    results = index.query(query_embeddings=[search_vector.tolist()], n_results=k)
 
-    # print(f"Distances: {distances}")
-    # print(f"ANN: {ann}")
+    # Extract similarities and class IDs from results
+    distances = results["distances"][0] if results["distances"] else []
+    metadatas = results["metadatas"][0] if results["metadatas"] else []
 
-    dist_df = pd.DataFrame(
-        {
-            "Similarity": pd.Series(distances[0]).apply(lambda x: round(x, 2)),
-            "ann": ann[0],
-        }
-    )
+    # Convert distances to similarities (Chroma returns distances, convert them)
+    similarities = [
+        1 - d for d in distances
+    ]  # For cosine distance, similarity = 1 - distance
 
-    # join by: dfl.ann = data.index
-    top_5 = pd.merge(dist_df, df, left_on="ann", right_index=True)
+    dist_df = pd.DataFrame({
+        "Similarity": [round(s, 2) for s in similarities],
+        "Class ID": [m["class_id"] for m in metadatas],
+        "Preferred Label": [m["preferred_label"] for m in metadatas],
+    })
 
-    for c in top_5["Class ID"]:
+    top_k = dist_df.copy()
+
+    for c in top_k["Class ID"]:
         n_sub_classes = count_sub_classes(c, edam_graph)[0]
-        top_5.loc[top_5["Class ID"] == c, "child_terms"] = int(n_sub_classes)
+        top_k.loc[top_k["Class ID"] == c, "child_terms"] = int(n_sub_classes)
 
-    return top_5[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
+    return top_k[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
 
-async def retrieve_classes(question: str, term_type: EDAMTerms, k = 5) -> str:
 
+async def retrieve_classes(question: str, term_type: EDAMTerms, k=5) -> str:
+    """Retrieve relevant EDAM classes for a given question and term type (TOPIC, OPERATION, DATA, FORMAT) by querying the corresponding Chroma collection."""
     search_vector = encoder.encode(question)
-    _vector = np.array([search_vector])
-    faiss.normalize_L2(_vector)
+    search_vector = normalize_query_vector(search_vector)
 
-    index = indexes[term_type.value]
+    collection = indexes[term_type.value]
 
-    distances, ann = index.search(_vector, k=k)
+    # Query Chroma collection
+    results = collection.query(query_embeddings=[search_vector.tolist()], n_results=k)
 
-    #print(f"Distances: {distances[0]}")
-    #print(f"ANN: {ann[0]}")
-    dist_df = pd.DataFrame(
-        {
-            "Similarity": pd.Series(distances[0]).apply(lambda x: round(x, 2)),
-            "ann": ann[0],
-        }
-    )
+    # Extract results
+    distances = results["distances"][0] if results["distances"] else []
+    metadatas = results["metadatas"][0] if results["metadatas"] else []
 
-    top_k = pd.merge(dist_df, split_classes[term_type.value], left_on="ann", right_index=True)
+    if not distances or len(distances) == 0:
+        return pd.DataFrame(
+            columns=["Preferred Label", "Similarity", "child_terms", "Class ID"]
+        )
+
+    # Convert distances to similarities
+    similarities = [1 - d for d in distances]
+
+    top_k = pd.DataFrame({
+        "Similarity": [round(s, 2) for s in similarities],
+        "Class ID": [m["class_id"] for m in metadatas],
+        "Preferred Label": [m["preferred_label"] for m in metadatas],
+    })
 
     if len(top_k) == 0:
-        return pd.DataFrame(columns=["Preferred Label", "Similarity", "child_terms", "Class ID"])
+        return pd.DataFrame(
+            columns=["Preferred Label", "Similarity", "child_terms", "Class ID"]
+        )
     else:
         for c in top_k["Class ID"]:
             n_sub_classes = count_sub_classes(c, edam_graph)[0]
@@ -178,7 +237,8 @@ async def retrieve_classes(question: str, term_type: EDAMTerms, k = 5) -> str:
 
         return top_k[["Preferred Label", "Similarity", "child_terms", "Class ID"]]
 
-# a prompt template for the LLM, asking to generate EDAM terms in JSON 
+
+# a prompt template for the LLM, asking to generate EDAM terms in JSON
 # format with 4 fields: topic, operation, data, format
 
 templateV1 = """
@@ -227,30 +287,33 @@ INSTRUCTIONS:
     - wrap the JSON in fenced code block like this: ```json ... ```
 """
 
+
 @cl.set_chat_profiles
 async def chat_profile():
+    """Define different chat profiles for the assistant. Each profile can represent a different version of the EDAM term retrieval/generation process."""
     return [
         cl.ChatProfile(
             name="EDAM retriever V1",
-            markdown_description="FAISS index over EDAM ontology terms.",
+            markdown_description="Embedding-search over EDAM ontology terms.",
             # icon="https://picsum.photos/200",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V2",
-            markdown_description="LLM generation of Bioinformatics tags + global FAISS index search over EDAM ontology terms.",
-            #icon="https://picsum.photos/250",
+            markdown_description="LLM generation of Bioinformatics tags + embedding-search over EDAM ontology terms.",
+            # icon="https://picsum.photos/250",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V3",
-            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + global FAISS index search over EDAM ontology terms.",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + embedding search over EDAM ontology terms.",
             # icon="https://picsum.photos/250",
         ),
         cl.ChatProfile(
             name="EDAM generator and retriever V4",
-            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + per-term FAISS index search over EDAM to retrieve the Top-1 class",
+            markdown_description="LLM generation of Bioinformatics tags, including a subset of the prompt + per-term embedding search over EDAM to retrieve the Top-1 class",
             # icon="https://picsum.photos/250",
         ),
     ]
+
 
 @cl.set_starters
 async def set_starters():
@@ -285,35 +348,54 @@ async def set_starters():
         ),
     ]
 
+
+_SYSTEM_INSTRUCTION = "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions."
+
+def _build_runnable(provider_label: str):
+    profile_key = PROVIDER_PROFILES[provider_label]
+    model = load_llm(profile_name=profile_key)
+    profile = load_profile(profile_name=profile_key)
+
+    if profile.get("provider") == "lmstudio":
+        # Models without system-role support: fold instruction into the human turn.
+        prompt = ChatPromptTemplate.from_messages([
+            ("human", f"{_SYSTEM_INSTRUCTION}\n\n{{question}}"),
+        ])
+    else:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", _SYSTEM_INSTRUCTION),
+            ("human", "{question}"),
+        ])
+
+    return prompt | model | StrOutputParser()
+
+
 @cl.on_chat_start
 async def on_chat_start():
-
     chat_profile = cl.user_session.get("chat_profile")
     print(f"Chat profile: {chat_profile}")
-    
-    model = ChatGroq(
-    model="deepseek-r1-distill-llama-70b",
-    #model="qwen/qwen3-32b",
-    temperature=0,
-    max_tokens=None,
-    reasoning_format="parsed",
-    timeout=None,
-    max_retries=2,
-    streaming=True,
-    # other params...
-    )
-    #model = ChatOpenAI(streaming=True)
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You're a very knowledgeable computational biologist who provides accurate and eloquent answers to biological questions.",
-            ),
-            ("human", "{question}"),
-        ]
-    )
-    runnable = prompt | model | StrOutputParser()
-    cl.user_session.set("runnable", runnable)
+
+    if chat_profile and "EDAM generator" in chat_profile:
+        default_provider = list(PROVIDER_PROFILES.keys())[0]
+        settings = await cl.ChatSettings(
+            [
+                cl.input_widget.Select(
+                    id="provider",
+                    label="LLM Provider / Model",
+                    values=list(PROVIDER_PROFILES.keys()),
+                    initial_value=default_provider,
+                )
+            ]
+        ).send()
+        provider_label = settings.get("provider", default_provider)
+        cl.user_session.set("runnable", _build_runnable(provider_label))
+
+
+@cl.on_settings_update
+async def on_settings_update(settings):
+    provider_label = settings.get("provider", list(PROVIDER_PROFILES.keys())[0])
+    cl.user_session.set("runnable", _build_runnable(provider_label))
+
 
 def extract_json(text: str):
     # Look for fenced JSON
@@ -323,9 +405,10 @@ def extract_json(text: str):
     # Fallback: try parsing whole text
     return text.strip()
 
+
 @cl.action_callback("download_edam_terms")
 async def download_message(action):
-    content = pd.read_json(json.dumps(action.payload))
+    content = pd.read_json(StringIO(json.dumps(action.payload)))
 
     file_name = "edam_terms.csv"
     if "topics" in action.label.lower():
@@ -339,10 +422,18 @@ async def download_message(action):
 
     content.to_csv(file_name, index=False)
 
+    # ensure the path is correct for the file element
+    file_path = os.path.abspath(file_name)
+    if not os.path.exists(file_path):
+        await cl.Message(content="Sorry, the file could not be found.").send()
+        return
+    print(f"File path for download: {file_path}")
+
     await cl.Message(
         content="Here are your EDAM terms:",
-        elements=[cl.File(name=file_name, path=file_name, display="inline")],
+        elements=[cl.File(name=file_name, path=file_path, display="inline")],
     ).send()
+
 
 @cl.on_message
 async def on_message(message: cl.Message):
@@ -351,28 +442,36 @@ async def on_message(message: cl.Message):
     if cl.user_session.get("chat_profile") == "EDAM retriever V1":
         relevant_classes = await retrieve_from_all_classes(message.content)
         dict_rel_classes = json.loads(relevant_classes.to_json())
-        print(dict_rel_classes)
+        
+        assert isinstance(dict_rel_classes, dict)
+        assert "Preferred Label" in dict_rel_classes.keys()
 
         answer = cl.Message(
             content="Here are the relevant EDAM classes: ",
             elements=[
                 cl.Dataframe(data=relevant_classes, display="inline", name="Dataframe"),
             ],
-            actions=[cl.Action(name="download_edam_terms", label="EDAM terms in CSV", icon="file", payload=dict_rel_classes)]
+            actions=[
+                cl.Action(
+                    name="download_edam_terms",
+                    label="EDAM terms in CSV",
+                    icon="file",
+                    payload=dict_rel_classes,
+                )
+            ],
         )
         await answer.send()
-    
-        mean_similarity = round(relevant_classes["Similarity"].mean(), 2) 
+
+        mean_similarity = round(relevant_classes["Similarity"].mean(), 2)
         mean_child_terms = round(relevant_classes["child_terms"].mean(), 2)
         answer = cl.Message(
             content=f"Here are the merged annotations statistics:\n"
-                    f"- Mean Similarity: {mean_similarity}\n"
-                    f"- Mean Child Terms: {mean_child_terms}"
+            f"- Mean Similarity: {mean_similarity}\n"
+            f"- Mean Child Terms: {mean_child_terms}"
         )
         await answer.send()
 
     elif "EDAM generator" in cl.user_session.get("chat_profile"):
-
         runnable = cast(Runnable, cl.user_session.get("runnable"))  # type: Runnable
 
         msg = cl.Message(content="")
@@ -392,72 +491,130 @@ async def on_message(message: cl.Message):
         await msg.send()
 
         # now that we have LLM-generated JSON, we can parse it and retrieve relevant EDAM terms
-        json_data = json.loads(extract_json(msg.content))                            
+        json_data = json.loads(extract_json(msg.content))
         topic_terms = json_data["topic"]
         operation_terms = json_data["operation"]
         data_terms = json_data["data"]
         format_terms = json_data["format"]
 
         merged_annotations = pd.DataFrame()
-        if ("V2" in cl.user_session.get("chat_profile")) or ("V3" in cl.user_session.get("chat_profile")):
+        if ("V2" in cl.user_session.get("chat_profile")) or (
+            "V3" in cl.user_session.get("chat_profile")
+        ):
             # align generated topic tags to EDAM topics
             if len(topic_terms.keys()) > 0:
-                relevant_topics = await retrieve_classes(json.dumps(topic_terms), EDAMTerms.TOPIC)
-                merged_annotations = pd.concat([merged_annotations, relevant_topics], ignore_index=True)
+                relevant_topics = await retrieve_classes(
+                    json.dumps(topic_terms), EDAMTerms.TOPIC
+                )
+                merged_annotations = pd.concat(
+                    [merged_annotations, relevant_topics], ignore_index=True
+                )
                 answer = cl.Message(
                     content="Here are the relevant EDAM Topics: ",
                     elements=[
-                        cl.Dataframe(data=relevant_topics, display="inline", name="Dataframe"),
+                        cl.Dataframe(
+                            data=relevant_topics, display="inline", name="Dataframe"
+                        ),
                     ],
-                    actions=[cl.Action(name="download_edam_terms", label="EDAM topics in CSV", icon="file", payload=json.loads(relevant_topics.to_json()))]
+                    actions=[
+                        cl.Action(
+                            name="download_edam_terms",
+                            label="EDAM topics in CSV",
+                            icon="file",
+                            payload=json.loads(relevant_topics.to_json()),
+                        )
+                    ],
                 )
                 await answer.send()
 
             # align generated operation tags to EDAM operations
             if len(operation_terms.keys()) > 0:
-                relevant_operation_terms = await retrieve_classes(json.dumps(operation_terms), EDAMTerms.OPERATION)
-                merged_annotations = pd.concat([merged_annotations, relevant_operation_terms], ignore_index=True)
+                relevant_operation_terms = await retrieve_classes(
+                    json.dumps(operation_terms), EDAMTerms.OPERATION
+                )
+                merged_annotations = pd.concat(
+                    [merged_annotations, relevant_operation_terms], ignore_index=True
+                )
                 answer = cl.Message(
                     content="Here are the relevant EDAM Operations: ",
                     elements=[
-                        cl.Dataframe(data=relevant_operation_terms, display="inline", name="Dataframe"),
+                        cl.Dataframe(
+                            data=relevant_operation_terms,
+                            display="inline",
+                            name="Dataframe",
+                        ),
                     ],
-                    actions=[cl.Action(name="download_edam_terms", label="EDAM operations in CSV", icon="file", payload=json.loads(relevant_operation_terms.to_json()))]    
+                    actions=[
+                        cl.Action(
+                            name="download_edam_terms",
+                            label="EDAM operations in CSV",
+                            icon="file",
+                            payload=json.loads(relevant_operation_terms.to_json()),
+                        )
+                    ],
                 )
                 await answer.send()
 
             # align generated data tags to EDAM data
             if len(data_terms.keys()) > 0:
-                relevant_data_terms = await retrieve_classes(json.dumps(data_terms), EDAMTerms.DATA)
-                merged_annotations = pd.concat([merged_annotations, relevant_data_terms], ignore_index=True)
+                relevant_data_terms = await retrieve_classes(
+                    json.dumps(data_terms), EDAMTerms.DATA
+                )
+                merged_annotations = pd.concat(
+                    [merged_annotations, relevant_data_terms], ignore_index=True
+                )
                 answer = cl.Message(
                     content="Here are the relevant EDAM Data: ",
                     elements=[
-                        cl.Dataframe(data=relevant_data_terms, display="inline", name="Dataframe"),
+                        cl.Dataframe(
+                            data=relevant_data_terms, display="inline", name="Dataframe"
+                        ),
                     ],
-                    actions=[cl.Action(name="download_edam_terms", label="EDAM data in CSV", icon="file", payload=json.loads(relevant_data_terms.to_json()))]
+                    actions=[
+                        cl.Action(
+                            name="download_edam_terms",
+                            label="EDAM data in CSV",
+                            icon="file",
+                            payload=json.loads(relevant_data_terms.to_json()),
+                        )
+                    ],
                 )
                 await answer.send()
 
             # align generated format tags to EDAM formats
             if len(format_terms.keys()) > 0:
-                relevant_format_terms = await retrieve_classes(json.dumps(format_terms), EDAMTerms.FORMAT)
-                merged_annotations = pd.concat([merged_annotations, relevant_format_terms], ignore_index=True)
+                relevant_format_terms = await retrieve_classes(
+                    json.dumps(format_terms), EDAMTerms.FORMAT
+                )
+                merged_annotations = pd.concat(
+                    [merged_annotations, relevant_format_terms], ignore_index=True
+                )
                 answer = cl.Message(
                     content="Here are the relevant EDAM Formats: ",
                     elements=[
-                        cl.Dataframe(data=relevant_format_terms, display="inline", name="Dataframe"),
+                        cl.Dataframe(
+                            data=relevant_format_terms,
+                            display="inline",
+                            name="Dataframe",
+                        ),
                     ],
-                    actions=[cl.Action(name="download_edam_terms", label="EDAM formats in CSV", icon="file", payload=json.loads(relevant_format_terms.to_json()))]
+                    actions=[
+                        cl.Action(
+                            name="download_edam_terms",
+                            label="EDAM formats in CSV",
+                            icon="file",
+                            payload=json.loads(relevant_format_terms.to_json()),
+                        )
+                    ],
                 )
                 await answer.send()
-            
-            mean_similarity = round(merged_annotations["Similarity"].mean(), 2) 
+
+            mean_similarity = round(merged_annotations["Similarity"].mean(), 2)
             mean_child_terms = round(merged_annotations["child_terms"].mean(), 2)
             answer = cl.Message(
                 content=f"Here are the merged annotations statistics:\n"
-                        f"- Mean Similarity: {mean_similarity}\n"
-                        f"- Mean Child Terms: {mean_child_terms}"
+                f"- Mean Similarity: {mean_similarity}\n"
+                f"- Mean Child Terms: {mean_child_terms}"
             )
             await answer.send()
 
@@ -473,16 +630,29 @@ async def on_message(message: cl.Message):
                 # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.TOPIC, k=1)
                 top_class["Generated term"] = k
+
                 edam_topics = pd.concat([edam_topics, top_class], ignore_index=True)
             if not edam_topics.empty:
-                edam_topics.sort_values(by=["Similarity"], ascending=False, inplace=True)
-        
+                edam_topics.sort_values(
+                    by=["Similarity"], ascending=False, inplace=True
+                )
+
+            # remove duplicates based on "Class ID"
+            edam_topics = edam_topics.drop_duplicates(subset=["Class ID"])
+
             answer = cl.Message(
                 content="Here are the relevant EDAM Topics: ",
                 elements=[
                     cl.Dataframe(data=edam_topics, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM topics in CSV", icon="file", payload=json.loads(edam_topics.to_json()))]
+                actions=[
+                    cl.Action(
+                        name="download_edam_terms",
+                        label="EDAM topics in CSV",
+                        icon="file",
+                        payload=json.loads(edam_topics.to_json()),
+                    )
+                ],
             )
             await answer.send()
 
@@ -492,18 +662,36 @@ async def on_message(message: cl.Message):
                 # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.OPERATION, k=2)
                 # # sort by child_terms ascending
                 # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
-                top_class = await retrieve_classes(json.dumps(v), EDAMTerms.OPERATION, k=1)
+                top_class = await retrieve_classes(
+                    json.dumps(v), EDAMTerms.OPERATION, k=1
+                )
                 top_class["Generated term"] = k
-                edam_operations = pd.concat([edam_operations, top_class], ignore_index=True)
+                edam_operations = pd.concat(
+                    [edam_operations, top_class], ignore_index=True
+                )
             if not edam_operations.empty:
-                edam_operations.sort_values(by=["Similarity"], ascending=False, inplace=True)
+                edam_operations.sort_values(
+                    by=["Similarity"], ascending=False, inplace=True
+                )
+
+            # remove duplicates based on "Class ID"
+            edam_operations = edam_operations.drop_duplicates(subset=["Class ID"])
 
             answer = cl.Message(
                 content="Here are the relevant EDAM Operations: ",
                 elements=[
-                    cl.Dataframe(data=edam_operations, display="inline", name="Dataframe"),
+                    cl.Dataframe(
+                        data=edam_operations, display="inline", name="Dataframe"
+                    ),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM operations in CSV", icon="file", payload=json.loads(edam_operations.to_json()))]    
+                actions=[
+                    cl.Action(
+                        name="download_edam_terms",
+                        label="EDAM operations in CSV",
+                        icon="file",
+                        payload=json.loads(edam_operations.to_json()),
+                    )
+                ],
             )
             await answer.send()
 
@@ -519,12 +707,22 @@ async def on_message(message: cl.Message):
             if not edam_data.empty:
                 edam_data.sort_values(by=["Similarity"], ascending=False, inplace=True)
 
+            # remove duplicates based on "Class ID"
+            edam_data = edam_data.drop_duplicates(subset=["Class ID"])
+
             answer = cl.Message(
                 content="Here are the relevant EDAM Data: ",
                 elements=[
-                    cl.Dataframe(data=edam_data, display="inline", name="Dataframe"),       
+                    cl.Dataframe(data=edam_data, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM data in CSV", icon="file", payload=json.loads(edam_data.to_json()))]
+                actions=[
+                    cl.Action(
+                        name="download_edam_terms",
+                        label="EDAM data in CSV",
+                        icon="file",
+                        payload=json.loads(edam_data.to_json()),
+                    )
+                ],
             )
             await answer.send()
 
@@ -534,38 +732,58 @@ async def on_message(message: cl.Message):
                 # top_class = await retrieve_classes(json.dumps(v), EDAMTerms.FORMAT, k=2)
                 # # sort by child_terms ascending
                 # top_class = top_class.sort_values(by=["child_terms"], ascending=True).head(1)
-                
+
                 top_class = await retrieve_classes(json.dumps(v), EDAMTerms.FORMAT, k=1)
                 top_class["Generated term"] = k
                 edam_formats = pd.concat([edam_formats, top_class], ignore_index=True)
             if not edam_formats.empty:
-                edam_formats.sort_values(by=["Similarity"], ascending=False, inplace=True)
+                edam_formats.sort_values(
+                    by=["Similarity"], ascending=False, inplace=True
+                )
+
+            # remove duplicates based on "Class ID"
+            edam_formats = edam_formats.drop_duplicates(subset=["Class ID"])
 
             answer = cl.Message(
                 content="Here are the relevant EDAM Formats: ",
                 elements=[
                     cl.Dataframe(data=edam_formats, display="inline", name="Dataframe"),
                 ],
-                actions=[cl.Action(name="download_edam_terms", label="EDAM formats in CSV", icon="file", payload=json.loads(edam_formats.to_json()))]
+                actions=[
+                    cl.Action(
+                        name="download_edam_terms",
+                        label="EDAM formats in CSV",
+                        icon="file",
+                        payload=json.loads(edam_formats.to_json()),
+                    )
+                ],
             )
             await answer.send()
 
             merged_annotations = pd.DataFrame()
             if not edam_topics.empty:
-                merged_annotations = pd.concat([merged_annotations, edam_topics], ignore_index=True)
+                merged_annotations = pd.concat(
+                    [merged_annotations, edam_topics], ignore_index=True
+                )
             if not edam_operations.empty:
-                merged_annotations = pd.concat([merged_annotations, edam_operations], ignore_index=True)
+                merged_annotations = pd.concat(
+                    [merged_annotations, edam_operations], ignore_index=True
+                )
             if not edam_data.empty:
-                merged_annotations = pd.concat([merged_annotations, edam_data], ignore_index=True)
+                merged_annotations = pd.concat(
+                    [merged_annotations, edam_data], ignore_index=True
+                )
             if not edam_formats.empty:
-                merged_annotations = pd.concat([merged_annotations, edam_formats], ignore_index=True)
-            
-            mean_similarity = round(merged_annotations["Similarity"].mean(), 2) 
+                merged_annotations = pd.concat(
+                    [merged_annotations, edam_formats], ignore_index=True
+                )
+
+            mean_similarity = round(merged_annotations["Similarity"].mean(), 2)
             mean_child_terms = round(merged_annotations["child_terms"].mean(), 2)
             answer = cl.Message(
                 content=f"Here are the merged annotations statistics:\n"
-                        f"- Mean Similarity: {mean_similarity}\n"
-                        f"- Mean Child Terms: {mean_child_terms}"
+                f"- Mean Similarity: {mean_similarity}\n"
+                f"- Mean Child Terms: {mean_child_terms}"
             )
             await answer.send()
 

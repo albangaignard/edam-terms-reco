@@ -1,0 +1,20 @@
+active_profile: groq-default
+
+profiles:
+  groq-default:
+    provider: groq
+    model: openai/gpt-oss-120b
+    temperature: 0
+
+  albert-default:
+    provider: albert
+    model: mistralai/Mistral-Small-3.2-24B-Instruct-2506
+    base_url: https://albert.api.etalab.gouv.fr/v1
+    api_key_env: ALBERT_API_KEY
+    temperature: 0
+
+  lmstudio-local:
+    provider: lmstudio
+    model: biomistral-7b-synthetic-ehr
+    base_url: http://localhost:1234/v1
+    temperature: 0
